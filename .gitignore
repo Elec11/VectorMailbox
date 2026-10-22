@@ -1,0 +1,92 @@
+# ---------------------------------------------------------------------------
+# Secrets. `gmail_app_password` and `embed_api_key` live here; the versioned
+# file is config.example.json. Env vars are the other way in, so .env too.
+# ---------------------------------------------------------------------------
+config.json
+.env
+.env.*
+!.env.example
+
+# ---------------------------------------------------------------------------
+# The index. Everything here is derived from your mailbox: warm vectors
+# (hundreds of MB), the preview sidecar and its WAL/SHM, the `--db` baselines
+# the README measures against, and a prune's `.bak`. None of it belongs in
+# history, and all of it is reproducible with `index` / `reindex` / `media`.
+# ---------------------------------------------------------------------------
+*.db
+*.sqlite
+*.sqlite3
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite-journal
+*.bak
+*.old
+
+# ---------------------------------------------------------------------------
+# Run output. gui.py tails a Refresh into gui-index.log; `bench`, `reindex`
+# and `audit` are otherwise redirected with `>` into a file, and those files
+# (final-*.json, demote-*.json, baseline-*-*.json) are the scratch the README's
+# numbers were read off — the numbers are in the README, the dumps are not.
+# ---------------------------------------------------------------------------
+*.log
+logs/
+/final-*.json
+/demote-*.json
+/baseline-*-*.json
+
+# ---------------------------------------------------------------------------
+# Eval sets. eval/eval.jsonl carries real subject lines and Message-IDs of a
+# real mailbox, so it stays local by default; eval/eval.example.jsonl is the
+# shape and is tracked. Rebuild the curated set with eval/curation.py.
+# Want it in history anyway: git add -f eval/eval.jsonl
+# ---------------------------------------------------------------------------
+eval/eval.jsonl
+eval/eval.proposed.jsonl
+
+# Scratch input for a manual probe run (test_embed_media.py --image ...)
+/testImage.jpg
+
+# ---------------------------------------------------------------------------
+# Python. Byte-code beside the sources, the usual caches, and any venv — the
+# real install path is requirements.txt into whatever environment you use.
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.coverage.xml
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+pip-log.txt
+.ipynb_checkpoints/
+
+# A wheel unpacked beside the code so the mail view can run without touching
+# site-packages (`PYTHONPATH=.deps`). requirements.txt is the real install path.
+.deps/
+
+# ---------------------------------------------------------------------------
+# OS and editor droppings. `.cursorignore` is tracked on purpose; `.cursor/`
+# (rules) is not ignored, so committing rules stays possible.
+# ---------------------------------------------------------------------------
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+.Spotlight-V100
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

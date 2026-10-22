@@ -1,0 +1,41 @@
+# Example eval set for `python eval.py bench --eval-file eval/eval.jsonl`.
+#
+# Copy this to eval/eval.jsonl (or generate a draft with `python eval.py
+# evalgen`) and edit it into the set you want to be measured against. One JSON
+# object per line; blank lines and # comments are skipped, so keep annotating
+# here. Unknown keys are preserved on save.
+#
+#   id            unique and stable: saved run records are joined on it
+#   query         the text you would type into `mailbox.py search`
+#   relevant      message ids that answer it - exactly messages.message_id,
+#                 angle brackets included (`mailbox.py search "..." --json`
+#                 prints them per hit)
+#   forbidden     ids that must never rank for this query
+#   out_of_corpus true = nothing in the mailbox can answer this, so the run is
+#                 scored on abstaining instead of on recall
+#   note          why the labels are what they are - a generated rule is a weak
+#                 label, and the note says which rule made it
+
+# A subject-derived row: both mails carry the same subject line, so both count.
+{"id": "offerte-aanvraag-nieuwe-webshop-bc96dc", "query": "Offerte aanvraag nieuwe webshop", "relevant": ["<A1b2C3d4E5f6A7b8C9d0E1f2A3b4c5d6@mail.gmail.com>", "<f6E5f4A3b2C1d0E9f8A7b6C5d4E3f2A1@mailer.voorbeeld.nl>"], "forbidden": [], "out_of_corpus": false, "note": "rule=subject_exact 'Offerte aanvraag nieuwe webshop' - WEAK label: check both really are the answer"}
+
+# A sender query, in the wording a Dutch speaker uses, with one id that must
+# stay out of the way: the autoresponder is from the same sender but is not the
+# mail anyone is looking for.
+{"id": "van-marc-06e450", "query": "van marc", "relevant": ["<9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f@mail.gmail.com>", "<1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d@outlook.com>"], "forbidden": ["<b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5@autoreply.voorbeeld.nl>"], "out_of_corpus": false, "note": "rule=sender_exact marc@voorbeeld.nl (14 mails, capped at 20) - WEAK label: everything from one address, not one answer"}
+
+# A date-scoped query: the day is indexed in the meta chunk, so this is really
+# a test that metadata survives the fusion.
+{"id": "mail-van-2026-05-df82df", "query": "mail van 2026-05-14", "relevant": ["<aa11bb22cc33dd44ee55ff66aa77bb88@mail.gmail.com>", "<dd99ee00ff11aa22bb33cc44dd55ee66@mail.gmail.com>"], "forbidden": [], "out_of_corpus": false, "note": "rule=date_exact 2026-05-14 (3 mails) - WEAK label: verify none of the three is noise"}
+
+# An attachment filename: the strongest exact-string signal there is, and the
+# row a lexical-leg change must never lose.
+{"id": "voorbeeld-administratie-b-v-5b4dbf", "query": "Voorbeeld Administratie B.V. Abonnementsfactuur V2600000042.pdf", "relevant": ["<cc11dd22ee33ff44aa55bb66cc77dd88@mail.gmail.com>"], "forbidden": [], "out_of_corpus": false, "note": "rule=attachment_file 'voorbeeld administratie b.v. abonnementsfactuur v2600000042.pdf' (1 mail) - exact filename from the chunk label"}
+
+# Out-of-corpus probes: nothing here can be answered, so a score above the
+# relevance floor is a false positive and abstention is the correct output.
+{"id": "waar-koop-ik-de-10fa8c", "query": "waar koop ik de beste kaas", "relevant": [], "forbidden": [], "out_of_corpus": true, "note": "out_of_corpus: fixed probe, nothing should match - scoring it above the relevance floor is a false positive"}
+{"id": "hoeveel-lichtjaar-is-het-796b31", "query": "hoeveel lichtjaar is het naar de maan", "relevant": [], "forbidden": [], "out_of_corpus": true, "note": "out_of_corpus: fixed probe, nothing should match - scoring it above the relevance floor is a false positive"}
+
+# A hand-labelled row, the shape `eval.py label "<query>" <rank>` writes.
+{"id": "factuur-papier-te-laat-3fa558", "query": "factuur papier te laat betaald", "relevant": ["<ff00ee11dd22cc33bb44aa55ff66ee77@mail.gmail.com>"], "forbidden": [], "out_of_corpus": false, "note": "rule=manual rank=2 of 10 on 2026-10-20 21:04 - hand labelled"}
