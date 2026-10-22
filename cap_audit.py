@@ -11,7 +11,7 @@ import sqlite3
 import statistics
 import sys
 
-import mailbox as mb
+from vectormailbox import mailbox as mb
 
 DB = sys.argv[1] if len(sys.argv) > 1 else "mailbox.db"
 cfg = mb.load_config("config.json")

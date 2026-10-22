@@ -28,8 +28,8 @@ from unittest import mock
 
 import numpy as np
 
-import mailbox as mb
-import queryparse as qp
+from vectormailbox import mailbox as mb
+from vectormailbox import queryparse as qp
 
 DIM = 96
 _STUB_TOKENS = re.compile(r"\w+", re.UNICODE)

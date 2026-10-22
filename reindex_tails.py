@@ -18,7 +18,7 @@ import sys
 
 import tqdm
 
-import mailbox as mb
+from vectormailbox import mailbox as mb
 
 
 def main() -> None:

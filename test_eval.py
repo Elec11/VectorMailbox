@@ -25,7 +25,7 @@ import sys
 import tempfile
 import unittest
 
-import eval as ev
+from vectormailbox import eval as ev
 
 
 def row(rid, ranked, relevant, **over):

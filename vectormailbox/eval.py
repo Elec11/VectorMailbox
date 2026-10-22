@@ -658,7 +658,7 @@ class Runner:
     """
 
     def __init__(self, cfg: dict):
-        import mailbox as mb            # inside: mailbox.py may be mid-edit
+        from . import mailbox as mb            # inside: mailbox.py may be mid-edit
         self.mb = mb
         self.cfg = dict(cfg)
         self.store = None
@@ -1137,7 +1137,7 @@ def cmd_bench(args) -> None:
         names = ", ".join(str(run["name"]) for run, _ in runs) or "none"
         print(f"offline: scoring saved runs only ({names})")
     else:
-        import mailbox as mb           # inside: only when we must touch the index
+        from . import mailbox as mb           # inside: only when we must touch the index
         # The harness inherits the CLI's --profile, so `mailbox.py --profile
         # legacy bench` measures the old pipeline as it was configured - store
         # included, which is what decides the BM25 tokenizer on an old index.
@@ -1528,7 +1528,7 @@ def cmd_label(args) -> None:
     queries from a shell loop, and a mis-clicked command fails with an exit
     code instead of waiting for input forever in a cron job.
     """
-    import mailbox as mb               # inside: mailbox.py may be mid-edit
+    from . import mailbox as mb               # inside: mailbox.py may be mid-edit
     query = str(_arg(args, "query", "") or "").strip()
     if not query:
         raise SystemExit("label needs a query: eval.py label \"<query>\" <rank>")

@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vectormailbox"
+description = "Hybrid search over your own Gmail inbox: EmbeddingGemma 2 vectors fused with SQLite FTS5 BM25, served as a mailbox-shaped UI on 127.0.0.1"
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+
+# Floors, not pins. These are the versions the suites pass on today; a bare
+# requirement would let `uvx` resolve a combination nobody has ever run, six
+# weeks from now, on someone else's machine.
+dependencies = [
+    "requests>=2.31",
+    "numpy>=1.26",           # the vector store: raw float32 blobs, cosine by hand
+    "tqdm>=4.66",            # index progress, which the GUI tails into a file
+    "beautifulsoup4>=4.12",
+    "pypdf>=4.0",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "python-pptx>=0.6.21",
+    "Pillow>=10.2",
+    # mailhtml.py — the mail view. Rust ammonia behind a Python binding: the same
+    # html5ever parser the browser uses, so the tree that is sanitized here is
+    # the tree the reading pane renders. Without it gui.py still serves
+    # everything it always did; the mail view reports why it is off.
+    "nh3>=0.3,<0.4",
+    # The GUI. FastAPI and uvicorn only ever talk to your own machine on
+    # 127.0.0.1, and nothing at runtime is fetched from a CDN.
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+]
+
+[project.optional-dependencies]
+# httpx is only starlette's TestClient transport, for test_gui.py.
+dev = ["httpx>=0.27"]
+# pdf_pages_as_images: render visual-only PDFs to page images. The indexer warns
+# and carries on without it, so it is not a base dependency — an install that
+# way stays small and wheel-only.
+media = ["PyMuPDF>=1.24"]
+
+[project.scripts]
+vectormailbox = "vectormailbox.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Elec11/Gmail-RAG"
+
+[tool.setuptools]
+# Declared, not auto-discovered: auto-discovery in a flat tree would also find
+# eval/, .deps/ and the test modules and put them in the wheel.
+packages = ["vectormailbox"]
+
+[tool.setuptools.dynamic]
+version = { attr = "vectormailbox._version.__version__" }
+
+[tool.setuptools.package-data]
+# The front end is three files and a mail renderer, served as static files: no
+# build step, no bundler, no CDN.
+vectormailbox = ["web/*"]

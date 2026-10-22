@@ -21,7 +21,7 @@ import time
 import unittest
 
 try:
-    import mailhtml
+    from vectormailbox import mailhtml
     HAVE_NH3 = True
 except ImportError:                                     # pragma: no cover
     mailhtml = None

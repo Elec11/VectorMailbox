@@ -44,7 +44,7 @@ from urllib.parse import urlsplit, urlunsplit
 import numpy as np
 import requests
 
-import mailbox as mb
+from vectormailbox import mailbox as mb
 
 
 def make_png(kind: str) -> bytes:

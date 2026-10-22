@@ -51,7 +51,7 @@ PHRASES = [
 
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import eval as ev                      # noqa: E402  (pure module: no mailbox import)
+from vectormailbox import eval as ev    # noqa: E402  (pure module: no mailbox import)
 
 
 def conn_ro(db_path: str) -> sqlite3.Connection:

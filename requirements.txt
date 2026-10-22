@@ -1,22 +1,9 @@
-requests
-numpy
-tqdm
-beautifulsoup4
-pypdf
-python-docx
-openpyxl
-python-pptx
-Pillow
-PyMuPDF
-
-# mailhtml.py — the mail view. Rust ammonia behind a Python binding: the same
-# html5ever parser the browser uses, so the tree that is sanitized here is the
-# tree the reading pane renders. Without it `gui.py` still serves everything it
-# always did; the mail view reports why it is off instead of half-working.
-nh3>=0.3,<0.4
-
-# mailbox.py gui — the search UI. FastAPI and uvicorn only talk to your own
-# machine on 127.0.0.1; nothing here is fetched from a CDN at runtime.
-fastapi
-uvicorn
-httpx          # test_gui.py only: starlette's TestClient transport
+# Development install: the package itself, editable, with the test client and
+# the PDF-page renderer the optional `pdf_pages_as_images` path wants.
+#
+#   pip install -r requirements.txt
+#
+# A user who only wants to *run* the app does not need this file — see the
+# install line in the README (`uv tool install …`), which pulls the same
+# dependencies from [project.dependencies] in pyproject.toml.
+-e .[dev,media]

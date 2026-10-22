@@ -31,9 +31,9 @@ from pathlib import Path
 from unittest import mock
 from urllib.parse import quote
 
-import mailbox as mb
-import gui
-import queryparse as qp
+from vectormailbox import mailbox as mb
+from vectormailbox import gui
+from vectormailbox import queryparse as qp
 from test_mailbox import (FakeIMAP, Image, NEEDS_PIL, StubbedEndpoint,
                           index_messages, make_cfg, make_msg, png_bytes)
 
@@ -517,7 +517,7 @@ class TestRemovedMail(Fixture):
         """Read-only is a property of the whole surface, not of one query: two
         POSTs, one that searches and one that re-runs the indexer. Anything that
         could delete mail would have to start by appearing here."""
-        src = (Path(__file__).with_name("gui.py")).read_text(encoding="utf-8")
+        src = Path(gui.__file__).read_text(encoding="utf-8")
         self.assertEqual(sorted(set(re.findall(r'@app\.post\("([^"]+)"', src))),
                          ["/api/index/refresh", "/api/search"])
 
