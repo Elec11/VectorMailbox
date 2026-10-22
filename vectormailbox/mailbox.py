@@ -81,6 +81,7 @@ except ImportError:  # pragma: no cover
     BeautifulSoup = None
 
 from . import paths
+from ._version import __version__
 
 try:
     # Optional by design: 'from:flexa factuur van vorige week' is better with
@@ -7112,6 +7113,11 @@ def main() -> None:
             pass
     p = argparse.ArgumentParser(
         description="Hybrid-searchable Gmail inbox (dense + BM25, multi-resolution chunks)")
+    # On the root parser, before the subcommand: `vectormailbox --version` is the
+    # line that answers "did the install work" without needing a config, a
+    # mailbox, or a folder to have been chosen first.
+    p.add_argument("--version", action="version",
+                   version=f"vectormailbox {__version__}")
     p.add_argument("--config", default="config.json")
     p.add_argument("--db", help="override db_path from the config "
                                 "(e.g. a frozen copy to measure)")
@@ -7278,6 +7284,11 @@ def main() -> None:
     pg.add_argument("--no-browser", action="store_true",
                     help="print the URL instead of opening a browser tab")
     pg.set_defaults(func=cmd_gui)
+
+    # The module that owns the checks registers its own command, so the parser
+    # does not grow a second description of what a healthy install looks like.
+    from . import doctor as _doctor
+    _doctor.add_subcommand(sub)
 
     try:                                    # bench / evalgen / label / audit
         from . import eval as _eval_cli
