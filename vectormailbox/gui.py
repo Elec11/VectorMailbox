@@ -46,6 +46,7 @@ import functools
 import hashlib
 import json
 import logging
+import os
 import subprocess
 import sys
 import threading
@@ -54,12 +55,13 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+from ._version import __version__
 from . import mailbox, paths
 from .mailbox import (DEFAULTS, EmbeddingClient, GmailFetcher, GmailSession,
                      HTML_CIDS, HTML_PART, MediaCache, QUERY_IMAGE_TYPES,
@@ -92,6 +94,11 @@ WEB_DIR = paths.resource_root() / "web"
 REPROBE_SECONDS = 60.0
 #: A health probe must be quick or it is not a health probe.
 PROBE_TIMEOUT = 5.0
+#: How long a caller may wait for the index to come back after a settings save.
+#: Generous on purpose: the warm-up is one big read, and on a slow disk a first
+#: indexing run after a setup is exactly when somebody has already been made to
+#: wait once.
+OPEN_TIMEOUT = 600.0
 #: `run()` refuses to answer past this many queued search requests: a browser
 #: holding down the enter key should not build an unbounded backlog.
 MAX_QUEUED = 8
@@ -903,6 +910,70 @@ class Engine:
         return {"senders": self.store.sender_facets(30),
                 "totals": self.store.facet_totals()}
 
+    # -- settings -----------------------------------------------------------
+    def config_view(self) -> dict:
+        """This engine's settings, for the panel.
+
+        `top` comes from the engine and not from the file: `--top` on the command
+        line outranks config.json, and a form that showed a different number than
+        the one searches are actually using would write that wrong number back on
+        the next save.
+        """
+        return config_view({**self.cfg, "top": self.top}, config_file(self.cfg))
+
+    def apply_settings(self, patch: dict, wait: bool = True) -> None:
+        """Adopt settings that have just been written to config.json.
+
+        The re-open goes through the queue instead of happening here, so the
+        caller decides whether to wait for it: warming a 146 MB index inside a
+        Save would hold the button down for exactly as long as that read takes,
+        when the page is already polling `/api/status` and will show "loading" by
+        itself. Callers that are not the Save route pass `wait=True` and get the
+        old, simpler behaviour of hearing about a bad database right away.
+
+        The IMAP login is replaced, not kept. It was made with the password that
+        has just been changed, and a session that outlives its own credentials is
+        a slow, confusing way to find out that a typo is now permanent.
+
+        Nothing here is partial: `_open` tears the store, the endpoint client and
+        the searcher down and rebuilds them from the new config, so a save that
+        moves the index or swaps the endpoint cannot leave half the engine
+        reading the old one.
+        """
+        self.cfg = {**self.cfg, **patch}
+        self.db_path = str(self.cfg.get("db_path") or DEFAULTS["db_path"])
+        self.refresh_log = paths.index_log(self.db_path)
+        # The one setting the engine keeps to itself rather than reading from
+        # `cfg` on every search; a save that did not move it would report the new
+        # number and keep answering with the old one.
+        self.top = int(self.cfg.get("top", 10) or 10)
+        if self.media is not None:
+            try:
+                self.media.close()
+            except Exception:
+                pass
+        # The preview sidecar sits beside the index, so it follows the move.
+        self.media = open_media_cache(self.cfg)
+        try:
+            self.imap.close()
+        except Exception:
+            pass
+        self.imap = GmailSession(GmailFetcher(self.cfg))
+        self.ready = False
+        future = self.submit(self._open)
+        if wait:
+            future.result(timeout=OPEN_TIMEOUT)
+
+    def test_settings(self, patch: dict) -> dict:
+        """Try these settings against the two services, saving nothing.
+
+        Runs on a media worker: a Gmail login is a second of TLS and handshake,
+        and the panel must not stop somebody's search while it asks a question
+        about a password.
+        """
+        cfg = {**self.cfg, **patch}
+        return {"gmail": test_gmail(cfg), "embed": test_embedding(cfg)}
+
     # -- status -------------------------------------------------------------
     def status_sync(self) -> dict:
         # How many previews the sidecar holds. `None` means previews are off
@@ -934,7 +1005,14 @@ class Engine:
                     "tier_norm": bool(self.cfg.get("tier_norm", True)),
                     "parse_filters": bool(self.cfg.get("parse_filters", True)),
                      "gmail_account_index": gmail_index(self.cfg),
-                     "queued": self._queue}
+                     # The page reads these to decide whether to open the
+                     # settings panel instead of an empty list: an app that was
+                     # just installed has nothing to show yet, and "no results"
+                     # is the wrong first sentence to meet someone with.
+                     "queued": self._queue,
+                     "version": __version__,
+                     "config_path": str(config_file(self.cfg)),
+                     **setup_state(self.cfg)}
         if self.store is not None:
             try:
                 s = self.store.stats()
@@ -1118,6 +1196,326 @@ def _body_filters(raw: Any):
     return isinstance(raw, dict) and bool(raw)
 
 
+# ---------------------------------------------------------------------------
+# settings: config.json as the GUI sees it
+# ---------------------------------------------------------------------------
+
+#: The fields the settings panel may show and change, grouped in the order a
+#: person fills them in: the account to read, the endpoint that makes search
+#: work, where the data goes, how search should feel.
+#:
+#: Everything else in `config.json` is written back untouched. That file also
+#: holds the ranking knobs the measurements in this repo depend on, and a panel
+#: that rewrote them on save would silently move a baseline the user never
+#: agreed to move - so the panel edits a named list, not "the config".
+SETTINGS_GROUPS = (
+    ("Mail account", (
+        ("gmail_user", "text", "Gmail address", "you@gmail.com"),
+        ("gmail_app_password", "secret", "App password", "16 characters, from myaccount.google.com"),
+        ("imap_host", "text", "IMAP server", "imap.gmail.com"),
+        ("imap_port", "number", "Port", "993"),
+        ("folders", "list", "Folders to index", "INBOX,SENT"),
+    )),
+    ("Embedding endpoint", (
+        ("embed_endpoint", "text", "URL", "http://127.0.0.1:8080/v1/embeddings"),
+        ("embed_api_key", "secret", "API key, if the endpoint wants one", ""),
+        ("embed_model", "text", "Model name", "embeddinggemma-2b-it-qat"),
+        ("dim", "number", "Vector dimensions", "768"),
+    )),
+    ("Index and previews", (
+        ("db_path", "text", "Index file", "mailbox.db"),
+        ("store_thumbs", "bool", "Keep local previews of images", "true"),
+        ("render_html", "bool", "Show mail as HTML", "true"),
+        ("pdf_pages_as_images", "bool", "Render scanned PDFs as page images", "false"),
+    )),
+    ("Search", (
+        ("search_mode", "choice", "Mode", "hybrid"),
+        ("top", "number", "Results per search", "10"),
+        ("profile", "choice", "Ranking profile", "v2"),
+    )),
+)
+
+#: What the panel offers for the `choice` fields, so the form and the ranking
+#: code cannot drift into disagreeing about which profiles exist.
+FIELD_CHOICES = {"search_mode": ("hybrid", "semantic", "lexical"),
+                 "profile": ("v2", "legacy")}
+
+#: The two values that never leave this process. The panel is told whether one is
+#: set, which is all a form needs to know; showing a stored app password back is
+#: how a secret ends up in a screenshot, a proxy log, or the browser's own
+#: history - and this one unlocks a whole mailbox.
+SECRET_FIELDS = tuple(key for _, group in SETTINGS_GROUPS
+                      for key, kind, *_ in group if kind == "secret")
+
+EDITABLE_FIELDS = tuple(key for _, group in SETTINGS_GROUPS
+                        for key, _kind, *_ in group)
+
+#: Without these there is nothing to search yet, so the first run opens the
+#: panel instead of an empty list.
+REQUIRED_FIELDS = ("gmail_user", "gmail_app_password", "embed_endpoint")
+
+#: Fields that need a whole line in the panel: an address, a URL, a path, a list.
+#: Said by the server rather than guessed by the page, so the form does not grow
+#: its own second copy of which settings are which.
+WIDE_FIELDS = ("gmail_user", "gmail_app_password", "folders", "embed_endpoint",
+               "embed_model", "db_path")
+
+TRUTHY = ("1", "true", "yes", "on")
+
+
+def setup_state(cfg: dict) -> dict:
+    """Is this a first run, and what exactly is missing from it.
+
+    The answer names the missing fields rather than saying "not configured": the
+    panel has to say which box to fill, and a person who set up mail but not the
+    endpoint should not be told to start again.
+    """
+    missing = [key for key in REQUIRED_FIELDS
+               if not str(cfg.get(key) or "").strip()]
+    return {"needs_setup": bool(missing), "missing": missing}
+
+
+def config_file(cfg: dict) -> Path:
+    """The file this run's settings live in - decided once, at load."""
+    return Path(str(cfg.get("config_path") or paths.config_path()))
+
+
+def clean_settings(body: dict, current: dict) -> dict:
+    """The panel's form, as typed values turned into config values.
+
+    Rejects anything it does not know by name. A typo like `gmail_ap_password`
+    accepted-and-ignored is the worst outcome here: the person presses Save,
+    sees the form close, and keeps getting a login error for a password they are
+    certain they typed.
+
+    An empty secret is *not* "clear it", it is "leave what is stored": the form
+    cannot show the current value, so an empty box is what an untouched field
+    looks like. There is no way to blank a secret from the panel, and no reason
+    to want one - overwriting is how a wrong password gets fixed.
+    """
+    patch: dict = {}
+    for key, raw in (body or {}).items():
+        if key not in EDITABLE_FIELDS:
+            raise EngineError(f"nothing in the settings is called “{key}”")
+        kind = next(kd for _n, g in SETTINGS_GROUPS for k, kd, *_ in g
+                    if k == key)
+        if isinstance(raw, (dict, list)) and kind != "list":
+            raise EngineError(f"“{key}” wants a value, not a list")
+        if kind == "secret":
+            text = "" if raw is None else str(raw).strip()
+            if text:
+                patch[key] = text
+            continue
+        if kind == "bool":
+            patch[key] = (raw if isinstance(raw, bool)
+                          else str(raw).strip().lower() in TRUTHY)
+        elif kind == "number":
+            text = str(raw if raw is not None else "").strip()
+            if not text:
+                raise EngineError(f"“{key}” needs a number, and the box is empty")
+            try:
+                patch[key] = int(text)
+            except ValueError:
+                raise EngineError(f"“{key}” is “{text}”, which is not a whole number") from None
+        elif kind == "list":
+            patch[key] = [part.strip() for part in str(raw or "").split(",")
+                          if part.strip()]
+        elif kind == "choice":
+            value = str(raw or "").strip().lower()
+            if value not in FIELD_CHOICES[key]:
+                raise EngineError(f"“{key}” must be one of "
+                                  f"{', '.join(FIELD_CHOICES[key])}")
+            patch[key] = value
+        else:
+            patch[key] = str(raw if raw is not None else "").strip()
+    # Anything the form did not send keeps the value the engine is running with,
+    # so a panel that shows four fields cannot silently blank the fifth. Secrets
+    # are left out of that: the merge in `write_config` already preserves what is
+    # stored, and carrying the engine's empty string over would overwrite a
+    # password somebody put in the file by hand while this page was open.
+    for key in EDITABLE_FIELDS:
+        if key not in patch and key in current and key not in SECRET_FIELDS:
+            patch[key] = current[key]
+    problems = []
+    user = str(patch.get("gmail_user") or "").strip()
+    if user and "@" not in user:
+        problems.append(f"“{user}” is not an email address")
+    url = str(patch.get("embed_endpoint") or "").strip()
+    if url and not url.lower().startswith(("http://", "https://")):
+        problems.append("the endpoint URL has to start with http:// or https://")
+    if problems:
+        raise EngineError("; ".join(problems))
+    return patch
+
+
+def write_config(path: Path, patch: dict) -> dict:
+    """Merge `patch` into config.json and put the file back.
+
+    The file is read again here instead of writing the copy held in memory:
+    between the page loading and a person pressing Save it may have been edited
+    by hand, and every key this panel does not show - all those ranking knobs -
+    has to come through the save exactly as it was.
+
+    Written to a temporary name in the same folder and moved over the original,
+    because a config left half-written by a crash is a config that no longer
+    parses, and this one holds the password to a mailbox.
+
+    `0600` before it becomes world-readable. On Windows the mode bits say little
+    and this costs nothing; on macOS and Linux it is the difference between an
+    app password readable by this user and one readable by anyone with a session
+    on the machine.
+    """
+    existing: dict = {}
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise EngineError(f"{path.name} could not be read: {e}") from None
+        if not isinstance(existing, dict):
+            raise EngineError(f"{path.name} holds a {type(existing).__name__}, "
+                              "not a set of settings")
+    merged = {**existing, **patch}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(merged, indent=2, ensure_ascii=False) + "\n",
+                   encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:                       # a filesystem with no mode bits
+        pass
+    os.replace(tmp, path)
+    return merged
+
+
+def save_settings(engine: "Engine", path: Path, patch: dict) -> dict:
+    """Store the settings, then tell the running engine to use them.
+
+    The re-open is started but not waited for: the page is already polling
+    `/api/status`, so it will say "loading" while the new index is read, and a
+    problem with a new database shows up where every other index problem shows
+    up rather than as a Save that appears to have failed.
+    """
+    write_config(path, patch)
+    engine.apply_settings(patch, wait=False)
+    return config_view(engine.cfg, path)
+
+
+def same_origin(request: Request) -> bool:
+    """Whether a request names this server as the page it came from.
+
+    A request with no `Origin` and no `Referer` counts as one: that is curl, the
+    CLI and a health check. Browsers send `Origin` on every cross-origin POST and
+    on same-origin POSTs too, so the only thing that can pass this without having
+    said where it came from is something that is not a web page.
+    """
+    sent = request.headers.get("origin") or request.headers.get("referer") or ""
+    if not sent:
+        return True
+    host = (request.headers.get("host") or "").lower()
+    return urlsplit(sent).netloc.lower() == host
+
+
+def config_view(cfg: dict, path: Path) -> dict:
+    """The config as an answer to a browser: every editable field, its current
+    value, and for a secret only whether one is stored."""
+    groups = []
+    for name, fields in SETTINGS_GROUPS:
+        rows = []
+        for key, kind, label, placeholder in fields:
+            row: dict = {"key": key, "kind": kind, "label": label,
+                         "placeholder": placeholder,
+                         "wide": bool(key in WIDE_FIELDS or kind in ("secret",
+                                                                     "list",
+                                                                     "bool"))}
+            if key in FIELD_CHOICES:
+                row["choices"] = list(FIELD_CHOICES[key])
+            value = cfg.get(key, DEFAULTS.get(key))
+            if kind == "secret":
+                row["set"] = bool(str(value or "").strip())
+                row["value"] = ""
+            elif kind == "list":
+                row["value"] = ",".join(str(v) for v in (value or []))
+            else:
+                row["value"] = value
+            rows.append(row)
+        groups.append({"name": name, "fields": rows})
+    return {"path": str(path), "exists": path.exists(),
+            "data_dir": str(paths.data_dir()), "version": __version__,
+            "groups": groups, **setup_state(cfg)}
+
+
+def test_embedding(cfg: dict) -> dict:
+    """One query vector from the endpoint, and an honest sentence about it.
+
+    A dimension that disagrees with `dim` is reported as a failure rather than a
+    success with a note: vectors of one size compared against an index built at
+    another produce results that look wrong and are worse than an error.
+    """
+    if not str(cfg.get("embed_endpoint") or "").strip():
+        return {"ok": False, "detail": "no endpoint set yet"}
+    client = EmbeddingClient({**cfg, "embed_timeout": PROBE_TIMEOUT})
+    started = time.time()
+    try:
+        vec = client.embed_query("health check")
+    except Exception as e:
+        return {"ok": False, "detail": f"{type(e).__name__}: {e}"}
+    size = int(getattr(vec, "size", 0) or 0)
+    want = int(cfg.get("dim") or DEFAULTS["dim"])
+    seconds = time.time() - started
+    if not size:
+        return {"ok": False, "detail": "the endpoint answered but sent no vector"}
+    if size != want:
+        return {"ok": False, "detail": f"the endpoint returns {size} dimensions; "
+                                       f"this index is built for {want}"}
+    return {"ok": True, "detail": f"{size} dimensions in {seconds:.1f}s"}
+
+
+def test_gmail(cfg: dict) -> dict:
+    """Log in and look at the folders, and nothing else.
+
+    Two verbs, both already on `GmailFetcher.READ_ONLY_COMMANDS`: LOGIN proves
+    the app password, and EXAMINE (`readonly=True`, so nothing is even marked
+    seen) proves each folder that is about to be indexed exists and says how
+    much mail it holds. Testing an account by writing to it is not a thing this
+    program knows how to do, and a settings panel would be a poor place to
+    start learning.
+    """
+    user = str(cfg.get("gmail_user") or "").strip()
+    secret = str(cfg.get("gmail_app_password") or "").strip()
+    if not user or not secret:
+        return {"ok": False, "detail": "needs the address and the app password"}
+    wanted = [str(f).strip() for f in (cfg.get("folders") or []) if str(f).strip()]
+    rows = []
+    try:
+        with GmailFetcher(cfg).session() as conn:
+            for name in wanted or ["INBOX"]:
+                quoted = name if " " not in name else f'"{name}"'
+                typ, data = conn.select(quoted, readonly=True)
+                if typ != "OK":
+                    rows.append({"name": name, "ok": False,
+                                 "detail": "not in this account"})
+                    continue
+                try:
+                    count = int(bytes(data[0] or b"0"))
+                except (TypeError, ValueError, IndexError):
+                    count = 0
+                rows.append({"name": name, "ok": True, "messages": count})
+    except Exception as e:
+        detail = f"{type(e).__name__}: {e}"
+        if "LOGIN" in detail.upper() or "authentication" in detail.lower():
+            detail = ("Gmail refused this address and app password - an app "
+                      f"password is not your login password ({detail})")
+        return {"ok": False, "detail": detail, "folders": rows}
+    missing = [r["name"] for r in rows if not r["ok"]]
+    if missing:
+        detail = ("logged in, but " + ", ".join(missing) +
+                  " is not a folder here")
+    else:
+        detail = f"logged in as {user}: " + ", ".join(
+            f"{r['name']} {r['messages']:,}" for r in rows)
+    return {"ok": not missing, "detail": detail, "folders": rows}
+
+
 def create_app(engine: Engine) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1135,6 +1533,32 @@ def create_app(engine: Engine) -> FastAPI:
                   lifespan=lifespan)
     app.state.engine = engine
 
+    @app.middleware("http")
+    async def only_this_pages_requests(request: Request, call_next):
+        """Turn away a state-changing request that came from another site.
+
+        There is no login here and no cookie, so a stranger's page has nothing to
+        steal - but there are two things it could still make this server do:
+        re-read somebody's mailbox, which means logging into Gmail and spending
+        minutes on it, and - once the settings panel exists - rewriting the file
+        that holds that mailbox's app password. A browser lets any page *send* to
+        localhost, which is why "it only listens on 127.0.0.1" was never the
+        protection people assumed it was.
+
+        Reads stay open: they are the same data the page can already ask for, and
+        a `<img src>` of a preview is not worth breaking.
+        """
+        if (request.method not in ("GET", "HEAD", "OPTIONS")
+                and request.url.path.startswith("/api/")):
+            if not same_origin(request):
+                log.warning("refused %s %s from %s", request.method,
+                            request.url.path, request.headers.get("origin")
+                            or request.headers.get("referer") or "nowhere")
+                return JSONResponse(
+                    {"error": "that request did not come from the "
+                              "vectormailbox page"}, status_code=403)
+        return await call_next(request)
+
     @app.get("/")
     async def index():
         return FileResponse(str(WEB_DIR / "index.html"))
@@ -1150,6 +1574,52 @@ def create_app(engine: Engine) -> FastAPI:
         st["queued"] = eng.queued
         st["refresh_running"] = bool(eng.refresh["running"])
         return st
+
+    @app.get("/api/config")
+    async def config_read():
+        eng: Engine = app.state.engine
+        try:
+            return await eng.acall(eng.config_view)
+        except Exception as e:
+            log.exception("reading the settings failed")
+            return _fail(e)
+
+    @app.post("/api/config")
+    async def config_save(body: dict = Body(default_factory=dict)):
+        """Write the settings panel out and start using what it says.
+
+        The answer is the same masked view a `GET` gives, so the page can put the
+        "set" ticks back into the password boxes without a second round trip and
+        without ever having seen the values.
+        """
+        eng: Engine = app.state.engine
+        try:
+            path = config_file(eng.cfg)
+            patch = clean_settings(body, eng.cfg)
+            return await eng.amedia(save_settings, eng, path, patch)
+        except EngineError as e:
+            return _fail(e)
+        except Exception as e:
+            log.exception("saving the settings failed")
+            return _fail(e)
+
+    @app.post("/api/config/test")
+    async def config_test(body: dict = Body(default_factory=dict)):
+        """Ask the two services whether they accept these settings, save nothing.
+
+        Before a mailbox is re-read and before a password is stored, this is the
+        question a person actually wants answered: did Gmail accept it, and does
+        that URL really speak the embeddings API.
+        """
+        eng: Engine = app.state.engine
+        try:
+            patch = clean_settings(body, eng.cfg)
+            return await eng.amedia(eng.test_settings, patch)
+        except EngineError as e:
+            return _fail(e)
+        except Exception as e:
+            log.exception("testing the settings failed")
+            return _fail(e)
 
     @app.post("/api/search")
     async def search(body: dict = Body(default_factory=dict)):

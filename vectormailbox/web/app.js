@@ -81,6 +81,14 @@ const state = {
   status: {},
   openId: '',
   lastMeta: null,
+  /* The settings card: the last `/api/config` answer (the server's list of what
+     is editable, so this file never keeps its own copy of it), whether it is
+     open, and whether the person has already waved it away this visit. */
+  setupCfg: null,
+  setupOpen: false,
+  setupFirst: false,
+  setupSeen: false,
+  setupBack: null,             // what had focus before the card opened
   /* Whether *this reader* asked to see a mail's own images, for this session.
      A per-mail choice would mean asking again in the next newsletter, which is
      how those prompts train people to click through anything. */
@@ -196,6 +204,14 @@ function renderStatus() {
   const s = state.status;
   if (s.loading) { setDot('busy', 'warming index', 'loading the index into memory'); return; }
   if (s.error) { setDot('warn', 'index unavailable', s.error); return; }
+  if (s.needs_setup) {
+    // Before "no results": there is no mailbox and no endpoint yet, and a pill
+    // that says "ready" over an empty list is what a broken install looks like.
+    setDot('warn', 'not set up',
+           'nothing is configured yet — ' + (s.missing || []).join(', ')
+           + ' · settings');
+    return;
+  }
   const bits = [];
   if (s.messages) bits.push(`${fmt(s.messages)} mail`);
   if (s.last_indexed_date) bits.push(String(s.last_indexed_date).slice(0, 10));
@@ -269,6 +285,11 @@ async function pollStatus() {
       $('t-tiernorm').checked = state.status.tier_norm !== false;
     }
     renderStatus();
+    // First run: an app with no mailbox and no endpoint has nothing to show, and
+    // "no results" is the wrong first sentence to meet somebody with. Once it has
+    // been waved away it stays away for the visit — the gear button is always
+    // there, and a panel that reopened every four seconds is a wall, not a hint.
+    if (state.status.needs_setup && !state.setupSeen) openSetup(true);
   } catch (e) {
     setDot('warn', 'server down', String(e));
   }
@@ -1375,6 +1396,44 @@ function wire() {
     });
   });
 
+  // -- the settings card
+  $('setup-btn').addEventListener('click', () => openSetup(false));
+  $('setup-test').addEventListener('click', testSetup);
+  $('setup-save').addEventListener('click', saveSetup);
+  $('setup-dismiss').addEventListener('click', () => {
+    state.setupSeen = true;           // this visit: the gear button reopens it
+    closeSetup();
+  });
+  $('setup').addEventListener('click', (ev) => {
+    if (ev.target !== $('setup')) return;   // the dim room, not the card
+    state.setupSeen = true;
+    closeSetup();
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (!state.setupOpen) return;
+    if (ev.key === 'Escape') {
+      ev.preventDefault();
+      state.setupSeen = true;
+      closeSetup();
+      return;
+    }
+    if (ev.key !== 'Tab') return;
+    // Tab stays inside the card. It is modal, and a dialog that lets Tab wander
+    // out behind it sends a keyboard user into a list they can no longer see.
+    const items = [...$('setup').querySelectorAll('button, input, select')]
+      .filter((n) => !n.disabled && !n.hidden);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (ev.shiftKey && document.activeElement === first) {
+      ev.preventDefault();
+      last.focus();
+    } else if (!ev.shiftKey && document.activeElement === last) {
+      ev.preventDefault();
+      first.focus();
+    }
+  });
+
   // -- search by picture ----------------------------------------------------
   $('img-btn').addEventListener('click', () => $('img-input').click());
   $('img-input').addEventListener('change', (e) => {
@@ -1537,6 +1596,199 @@ async function pollRefresh() {
       if (state.view === 'search' && state.q) runSearch(true); else loadBrowse(true);
     }
   } catch (e) { /* keep polling; the panel is showing the log anyway */ }
+}
+
+/* ------------------------------------------------------------- settings --- */
+
+/* The card is drawn from `/api/config`, not from a list kept here: the server
+ * knows which settings exist, which of them are secrets, and which choices the
+ * ranking code will accept. A second list in this file is a second thing to
+ * forget to update, and the failure would be a field that silently saves nothing.
+ */
+
+function setupField(f) {
+  const id = 'set-' + f.key;
+  // `for` on every kind, the checkbox included: a toggle's label is its accessible
+  // name, and a box whose words are not attached to it is announced as "on".
+  const label = el('label', { class: 'set-label', for: id },
+                   el('span', { text: f.label }));
+  if (f.kind === 'bool') {
+    const box = el('input', { type: 'checkbox', id });
+    box.checked = !!f.value;
+    // Box first: the label is the sentence you read, the box is the thing you
+    // hit, and a checkbox after its own words puts the target on the wrong side.
+    return el('div', { class: 'set-row is-toggle' + (f.wide ? ' wide' : '') },
+             box, label);
+  }
+  let input;
+  if (f.kind === 'choice') {
+    input = el('select', { class: 'set-input', id });
+    (f.choices || []).forEach((c) => input.append(el('option', { value: c, text: c })));
+    input.value = String(f.value);
+  } else {
+    input = el('input', {
+      class: 'set-input', id,
+      type: f.kind === 'number' ? 'number' : (f.kind === 'secret' ? 'password' : 'text'),
+      placeholder: (f.kind === 'secret' && f.set)
+        ? 'kept as it is — type to replace it' : (f.placeholder || ''),
+      autocomplete: f.kind === 'secret' ? 'new-password' : 'off',
+      spellcheck: 'false',
+    });
+    // A secret is never put in the box: it was never sent, and an empty box on
+    // save means "leave the stored one alone" — the one thing a form that cannot
+    // show a password has to get right.
+    if (f.kind !== 'secret') input.value = f.value == null ? '' : String(f.value);
+    if (f.kind === 'secret' && f.set) {
+      label.append(el('span', { class: 'set-stored', text: 'stored' }));
+    }
+  }
+  const row = el('div', { class: 'set-row' + (f.wide ? ' wide' : '') }, label, input);
+  if (f.kind === 'list') {
+    row.append(el('p', { class: 'set-hint',
+      text: 'comma-separated, exactly as Gmail names them' }));
+  }
+  return row;
+}
+
+function renderSetup(cfg, first) {
+  const fields = $('setup-fields');
+  fields.textContent = '';
+  for (const group of cfg.groups) {
+    fields.append(el('section', { class: 'setup-group' },
+      el('div', { class: 'setup-ghead' }, el('span', { class: 'setup-gname',
+                                                      text: group.name })),
+      el('div', { class: 'setup-grid' }, group.fields.map(setupField))));
+  }
+  $('setup-kicker').textContent = first ? 'first run' : 'settings';
+  $('setup-title').textContent = first ? 'Set up the mailbox' : 'Settings';
+  const missing = (cfg.missing || []).length
+    ? (cfg.missing || []).map((k) => {
+        const f = cfg.groups.flatMap((g) => g.fields).find((x) => x.key === k);
+        return f ? f.label.toLowerCase() : k;
+      })
+    : [];
+  $('setup-lede').textContent = first
+    ? `vectormailbox cannot search yet: ${missing.join(', ')} `
+      + 'is still missing. Nothing here leaves this machine except the mailbox '
+      + 'reads and the query vectors — this app has no delete, no send, and no '
+      + 'copy of your mail other than the index.'
+    : 'These are the settings this app writes to its own config file. The two '
+      + 'passwords are never shown back: an empty box keeps what is stored.';
+  $('setup-file').textContent = `${cfg.path}${cfg.exists ? '' : '  ·  not written yet'}`
+    + `  ·  v${cfg.version}`;
+  $('setup-save').textContent = first ? 'save & read the mailbox' : 'save';
+  $('setup-dismiss').textContent = first ? 'not now' : 'close';
+  $('setup-verdicts').hidden = true;
+  $('setup-verdicts').textContent = '';
+}
+
+function setupValues() {
+  const patch = {};
+  for (const g of (state.setupCfg ? state.setupCfg.groups : [])) {
+    for (const f of g.fields) {
+      const node = $('set-' + f.key);
+      if (!node) continue;
+      if (f.kind === 'bool') patch[f.key] = node.checked;
+      else if (f.kind === 'choice') patch[f.key] = node.value;
+      else patch[f.key] = String(node.value || '').trim();
+    }
+  }
+  return patch;
+}
+
+function renderVerdicts(rows) {
+  const box = $('setup-verdicts');
+  box.textContent = '';
+  for (const [name, v] of rows) {
+    box.append(el('p', { class: 'verdict ' + (v.ok ? 'ok' : 'no') },
+      el('b', { text: name }),
+      el('span', { text: v.detail || (v.ok ? 'ok' : 'no answer') })));
+  }
+  box.hidden = false;
+}
+
+async function openSetup(first) {
+  if (state.setupOpen) return;
+  let cfg;
+  try {
+    cfg = await api('/api/config');
+  } catch (e) {
+    toast('settings could not be read: ' + String(e.message || e));
+    return;
+  }
+  state.setupCfg = cfg;
+  state.setupFirst = !!first && !!cfg.needs_setup;
+  state.setupOpen = true;
+  state.setupBack = document.activeElement;
+  $('setup').hidden = false;
+  renderSetup(cfg, state.setupFirst);
+  // Start the caret in the box that is actually stopping the app, not at the top
+  // of a form the person may have half filled already.
+  const wanted = (cfg.missing || [])[0];
+  const target = wanted ? $('set-' + wanted) : null;
+  (target || $('setup-save')).focus();
+}
+
+function closeSetup() {
+  if (!state.setupOpen) return;
+  state.setupOpen = false;
+  $('setup').hidden = true;
+  const back = state.setupBack;
+  state.setupBack = null;
+  // Focus goes back where it came from: a keyboard user who opened the card from
+  // the gear button should land on the gear button, not at the top of the page.
+  (back && document.contains(back) ? back : $('setup-btn')).focus();
+}
+
+async function testSetup() {
+  const btn = $('setup-test');
+  btn.disabled = true;
+  btn.textContent = 'testing…';
+  try {
+    const r = await api('/api/config/test', { method: 'POST',
+                                              body: JSON.stringify(setupValues()) });
+    renderVerdicts([['gmail', r.gmail || { ok: false, detail: 'no answer' }],
+                    ['embed endpoint', r.embed || { ok: false, detail: 'no answer' }]]);
+  } catch (e) {
+    renderVerdicts([['settings', { ok: false, detail: String(e.message || e) }]]);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'test';
+  }
+}
+
+async function saveSetup() {
+  const btn = $('setup-save');
+  const first = state.setupFirst;
+  btn.disabled = true;
+  try {
+    state.setupCfg = await api('/api/config', { method: 'POST',
+                                                body: JSON.stringify(setupValues()) });
+    renderSetup(state.setupCfg, first && !!state.setupCfg.needs_setup);
+    await pollStatus();
+    await loadFacets();
+    if (state.setupCfg.needs_setup) {
+      // Save did not finish the setup: stay open, and say which box is still
+      // empty rather than closing on a form that cannot work yet.
+      toast('saved — ' + state.setupCfg.missing.join(', ') + ' is still missing');
+      return;
+    }
+    state.setupSeen = true;
+    state.setupFirst = false;
+    closeSetup();
+    if (first) {
+      // The one thing left between a fresh install and a search that answers is
+      // reading the mailbox, and the button said it would do that.
+      toast('settings saved — reading the mailbox');
+      startRefresh();
+    } else {
+      toast('settings saved');
+    }
+  } catch (e) {
+    toast(String(e.message || e));
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 /* ----------------------------------------------------------------- boot --- */

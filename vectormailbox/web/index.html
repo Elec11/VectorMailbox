@@ -54,9 +54,14 @@
       <span class="dot" id="dot"></span>
       <span class="pill-text" id="pilltext">warming up</span>
     </div>
-    <button class="ghost-btn" id="refresh-btn" title="Run mailbox.py index">
+    <button class="ghost-btn" id="refresh-btn" title="Read the mailbox again and index what is new">
       <svg viewBox="0 0 20 20" width="15" height="15" class="spin-target"><path d="M16 10a6 6 0 1 1-1.9-4.4" class="ui-stroke"/><path d="M16 3.4V6h-2.6" class="ui-stroke"/></svg>
       <span>refresh</span>
+    </button>
+    <button class="icon-btn" id="setup-btn"
+            title="Settings — the mailbox, the embedding endpoint, where the index lives"
+            aria-label="Settings" aria-haspopup="dialog">
+      <svg viewBox="0 0 20 20" width="16" height="16"><circle cx="10" cy="10" r="2.6" class="ui-stroke"/><path d="M10 2.6v2M10 15.4v2M2.6 10h2M15.4 10h2M4.8 4.8l1.4 1.4M13.8 13.8l1.4 1.4M15.2 4.8l-1.4 1.4M6.2 13.8l-1.4 1.4" class="ui-stroke"/></svg>
     </button>
     <button class="icon-btn" id="theme-btn" title="Switch to paper" aria-label="Switch theme">
       <svg viewBox="0 0 20 20" width="16" height="16"><circle cx="10" cy="10" r="4" class="ui-fill"/><path d="M10 2v2M10 16v2M2 10h2M16 10h2M4.4 4.4l1.4 1.4M14.2 14.2l1.4 1.4M15.6 4.4l-1.4 1.4M5.8 14.2l-1.4 1.4" class="ui-stroke"/></svg>
@@ -143,6 +148,31 @@
     </button>
   </div>
   <pre class="rp-log" id="rp-log"></pre>
+</div>
+
+<!-- Settings: one card about one file. The frame lives in the document so the
+     shape of it is readable without running anything; the fields come from
+     `/api/config`, because the server is the thing that knows which settings
+     exist and which two it will not send back. -->
+<div class="setup" id="setup" hidden>
+  <section class="setup-card" role="dialog" aria-modal="true" aria-labelledby="setup-title">
+    <header class="setup-head">
+      <p class="setup-kicker" id="setup-kicker">settings</p>
+      <h2 class="setup-title" id="setup-title">Set up the mailbox</h2>
+      <p class="setup-lede" id="setup-lede"></p>
+    </header>
+    <div class="setup-fields" id="setup-fields"></div>
+    <div class="setup-verdicts" id="setup-verdicts" hidden></div>
+    <footer class="setup-foot">
+      <p class="setup-file" id="setup-file"></p>
+      <div class="setup-actions">
+        <button class="ghost-btn" id="setup-dismiss">not now</button>
+        <button class="ghost-btn" id="setup-test"
+                title="Ask Gmail and the endpoint whether these values work, without saving anything">test</button>
+        <button class="solid-btn" id="setup-save">save</button>
+      </div>
+    </footer>
+  </section>
 </div>
 
 <div class="toast" id="toast" hidden></div>

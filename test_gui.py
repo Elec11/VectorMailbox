@@ -17,6 +17,7 @@ import argparse
 import base64
 import contextlib
 import io
+import os
 import json
 import re
 import shutil
@@ -513,13 +514,33 @@ class TestRemovedMail(Fixture):
         self.assertNotIn("s.last_reconcile_at", fn)
         self.assertIn("whenLabel(asDate(", fn)
 
-    def test_the_only_thing_the_page_can_ask_for_is_a_re_read(self):
-        """Read-only is a property of the whole surface, not of one query: two
-        POSTs, one that searches and one that re-runs the indexer. Anything that
-        could delete mail would have to start by appearing here."""
+    def test_the_page_can_ask_for_four_things_and_none_reaches_the_mailbox(self):
+        """Read-only is a property of the whole surface, so the surface is listed.
+
+        Four POSTs now, and what each can do: `/api/search` reads the index,
+        `/api/index/refresh` starts a re-read of the mailbox, `/api/config` writes
+        this program's own settings file, `/api/config/test` logs in to look at a
+        folder. None of them can change anybody's mail — and the two that involve
+        Gmail at all do it through `GmailFetcher`, whose read-only verb list is
+        enforced in its own suite.
+
+        Anything able to delete a message would have to appear here first, which
+        is why this list is asserted rather than described: a settings panel is
+        exactly the kind of feature that quietly grows a fifth one.
+        """
         src = Path(gui.__file__).read_text(encoding="utf-8")
         self.assertEqual(sorted(set(re.findall(r'@app\.post\("([^"]+)"', src))),
-                         ["/api/index/refresh", "/api/search"])
+                         ["/api/config", "/api/config/test",
+                          "/api/index/refresh", "/api/search"])
+        # The one place the GUI itself holds an IMAP connection must examine, not
+        # select: `readonly=True` is what makes the verb EXAMINE, and without it
+        # merely opening a folder marks mail read on the server.
+        selects = re.findall(r"conn\.select\(([^)]*)\)", src)
+        self.assertTrue(selects, "the settings test is supposed to look at a folder")
+        self.assertTrue(all("readonly=True" in s for s in selects), selects)
+        test_gmail = src.split("def test_gmail(")[1].split("\ndef ")[0]
+        self.assertEqual(set(re.findall(r"conn\.([a-z_]+)\(", test_gmail)),
+                         {"select"})
 
 
 def raw_mime(mid, filename, data, content_type="application/pdf"):
@@ -1992,6 +2013,358 @@ class TestIndexCommand(unittest.TestCase):
         can point at."""
         cmd = gui.index_command({"config_path": "", "db_path": None})
         self.assertEqual(cmd, [sys.executable, "-m", "vectormailbox", "index"])
+
+
+class TestSettingsView(unittest.TestCase):
+    """What the settings panel is allowed to know - and what it is never told."""
+
+    CFG = {**mb.DEFAULTS, "gmail_user": "me@example.com",
+           "gmail_app_password": "sup3rs3cretappw", "embed_endpoint":
+           "http://127.0.0.1:8080/v1/embeddings", "embed_api_key": "sk-abc123",
+           "rrf_k": 20}
+
+    def row(self, view, key):
+        return next(f for g in view["groups"] for f in g["fields"]
+                    if f["key"] == key)
+
+    def test_an_app_password_never_travelsto_the_browser(self):
+        """The panel shows a tick, not the value. Echoing a stored password back
+        is how it ends up in a screenshot, a support message, or the browser's own
+        history - and this one opens a whole mailbox."""
+        view = gui.config_view(self.CFG, Path("config.json"))
+        self.assertNotIn("sup3rs3cretappw", json.dumps(view))
+        self.assertNotIn("sk-abc123", json.dumps(view))
+        self.assertEqual(self.row(view, "gmail_app_password")["value"], "")
+        self.assertTrue(self.row(view, "gmail_app_password")["set"])
+        self.assertTrue(self.row(view, "embed_api_key")["set"])
+        self.assertFalse(self.row(gui.config_view(
+            {**self.CFG, "embed_api_key": ""},
+            Path("config.json")), "embed_api_key")["set"])
+
+    def test_every_field_it_edits_arrives_with_a_value_to_show(self):
+        view = gui.config_view(self.CFG, Path("config.json"))
+        shown = {f["key"]: f for g in view["groups"] for f in g["fields"]}
+        self.assertEqual(set(shown), set(gui.EDITABLE_FIELDS))
+        self.assertEqual(shown["gmail_user"]["value"], "me@example.com")
+        # a list arrives joined, because that is what the box holds
+        self.assertIsInstance(shown["folders"]["value"], str)
+
+    def test_it_says_what_a_first_run_is_missing_rather_than_just_being_empty(self):
+        """`needs_setup` without names would leave the newcomer guessing which of
+        four boxes to fill; the missing list is the whole reason the overlay can
+        point at a field."""
+        empty = gui.setup_state({"gmail_user": "", "gmail_app_password": "",
+                                 "embed_endpoint": ""})
+        self.assertTrue(empty["needs_setup"])
+        self.assertEqual(empty["missing"], list(gui.REQUIRED_FIELDS))
+        almost = gui.setup_state({**self.CFG, "embed_endpoint": "  "})
+        self.assertEqual(almost["missing"], ["embed_endpoint"])
+        self.assertFalse(gui.setup_state(self.CFG)["needs_setup"])
+
+    def test_it_names_the_file_and_the_folder_it_will_use(self):
+        """Someone who cannot find their index has to be told where it is, in the
+        words the app actually used to decide - not left with a relative
+        `mailbox.db` and no way to know which folder that meant."""
+        view = gui.config_view(self.CFG, Path("/tmp/vm/config.json"))
+        self.assertEqual(view["path"], str(Path("/tmp/vm/config.json")))
+        self.assertTrue(Path(view["data_dir"]).is_absolute())
+        self.assertEqual(view["version"], gui.__version__)
+
+
+class TestSettingsForm(unittest.TestCase):
+    """The form's answer, turned back into config values."""
+
+    def test_a_key_nobody_offered_is_refused_not_ignored(self):
+        """A typo accepted quietly is the worst outcome: the panel closes, the
+        person believes the password is saved, and the login error keeps coming
+        back for a key that does not exist."""
+        with self.assertRaises(gui.EngineError) as got:
+            gui.clean_settings({"gmail_ap_password": "x"}, mb.DEFAULTS)
+        self.assertIn("gmail_ap_password", str(got.exception))
+
+    def test_an_untouched_password_box_means_leave_the_password_alone(self):
+        """The form cannot show the stored value, so an empty box is what an
+        untouched field looks like. Treating that as "clear it" would wipe the
+        only credential the app needs, on every save."""
+        patch = gui.clean_settings({"gmail_app_password": "", "top": "12"},
+                                   mb.DEFAULTS)
+        self.assertNotIn("gmail_app_password", patch)
+        self.assertEqual(patch["top"], 12)
+
+    def test_numbers_toggles_and_lists_arrive_typed(self):
+        """config.json is read by the indexer too, and a port stored as "993" is
+        a port that will not connect."""
+        patch = gui.clean_settings({"imap_port": "993", "dim": " 768 ",
+                                    "store_thumbs": "false",
+                                    "pdf_pages_as_images": "on",
+                                    "folders": "INBOX, [Gmail]/Sent Mail ,"},
+                                   mb.DEFAULTS)
+        self.assertEqual(patch["imap_port"], 993)
+        self.assertEqual(patch["dim"], 768)
+        self.assertIs(patch["store_thumbs"], False)
+        self.assertIs(patch["pdf_pages_as_images"], True)
+        self.assertEqual(patch["folders"], ["INBOX", "[Gmail]/Sent Mail"])
+
+    def test_a_box_left_empty_for_a_number_is_an_error_not_a_zero(self):
+        with self.assertRaises(gui.EngineError):
+            gui.clean_settings({"top": ""}, mb.DEFAULTS)
+
+    def test_a_mode_the_ranking_code_does_not_have_is_refused(self):
+        with self.assertRaises(gui.EngineError) as got:
+            gui.clean_settings({"search_mode": "magic"}, mb.DEFAULTS)
+        self.assertIn("hybrid", str(got.exception))
+
+    def test_an_endpoint_without_a_scheme_is_stopped_at_the_form(self):
+        """`127.0.0.1:8080/v1/embeddings` is the typo everyone makes once, and
+        saved it fails later as a request error that does not mention the URL."""
+        with self.assertRaises(gui.EngineError) as got:
+            gui.clean_settings({"embed_endpoint": "127.0.0.1:8080/v1/embeddings"},
+                               mb.DEFAULTS)
+        self.assertIn("http://", str(got.exception))
+        self.assertEqual(
+            gui.clean_settings({"embed_endpoint": "http://127.0.0.1:8080/x"},
+                               mb.DEFAULTS)["embed_endpoint"],
+            "http://127.0.0.1:8080/x")
+
+    def test_a_field_the_form_did_not_send_keeps_the_value_it_had(self):
+        """Saving four boxes must not blank the rest of the file the engine is
+        running on - the panel shows a subset, and a subset is not a replacement
+        for the whole config."""
+        patch = gui.clean_settings({"top": "30"}, mb.DEFAULTS)
+        self.assertEqual(patch["imap_host"], mb.DEFAULTS["imap_host"])
+        self.assertEqual(patch["search_mode"], mb.DEFAULTS["search_mode"])
+
+
+class TestSettingsFile(unittest.TestCase):
+    """Writing config.json: what survives, and in what shape."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name) / "config.json"
+
+    def test_the_keys_the_panel_never_showed_survive_the_save(self):
+        """The file holds the ranking knobs every measurement in this repo was
+        taken with. A panel that rewrote the file from its own fields would
+        silently move a baseline somebody is comparing against."""
+        self.path.write_text(json.dumps({
+            "rrf_k": 17.5, "chunk_sizes": {"small": 320, "large": 1200},
+            "gmail_user": "me@example.com"}), encoding="utf-8")
+        merged = gui.write_config(self.path, {"top": 25})
+        again = json.loads(self.path.read_text(encoding="utf-8"))
+        self.assertEqual(again["rrf_k"], 17.5)
+        self.assertEqual(again["chunk_sizes"]["large"], 1200)
+        self.assertEqual(again["gmail_user"], "me@example.com")
+        self.assertEqual(again["top"], 25)
+        self.assertEqual(merged["top"], 25)
+
+    def test_the_file_is_replaced_not_rewritten_in_place(self):
+        """A config left half-written by a crash is a config that does not parse,
+        and this one holds the password to a mailbox. So it goes to a temporary
+        name and is moved over the original, which leaves no half file and no
+        temporary one."""
+        gui.write_config(self.path, {"top": 5})
+        left = sorted(p.name for p in self.path.parent.iterdir())
+        self.assertEqual(left, ["config.json"])
+
+    @unittest.skipIf(os.name != "posix", "Windows mode bits say nothing useful")
+    def test_the_file_is_readable_only_by_its_owner(self):
+        gui.write_config(self.path, {"gmail_app_password": "x"})
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
+    def test_a_file_that_is_not_settings_is_left_alone(self):
+        """A `config.json` holding a list or a stray string is a mistake someone
+        made by hand; overwriting it with defaults would bury the evidence of
+        what went wrong."""
+        self.path.write_text('["not", "settings"]', encoding="utf-8")
+        with self.assertRaises(gui.EngineError):
+            gui.write_config(self.path, {"top": 5})
+        self.assertEqual(self.path.read_text(encoding="utf-8"),
+                         '["not", "settings"]')
+
+    def test_a_folder_that_does_not_exist_yet_is_made(self):
+        """The first save on a fresh machine writes into the app's data folder,
+        which nothing has created yet - that is when the folder has to appear."""
+        nested = Path(self.tmp.name) / "nest" / "config.json"
+        gui.write_config(nested, {"top": 1})
+        self.assertTrue(nested.exists())
+
+
+@unittest.skipIf(TestClient is None, NEEDS_CLIENT)
+class TestSettingsRoutes(Fixture):
+    """Saving settings through the page: it takes effect without a restart, and a
+    stranger's page cannot ask for any of it."""
+
+    def setUp(self):
+        super().setUp()
+        # The fixture already wrote a config.json into its temp folder; the
+        # engine is pointed at that one. Pinned on purpose: an unpinned
+        # `config_path` resolves through the normal search, and run from a
+        # checkout that search finds the developer's own file - which these tests
+        # would then overwrite with a stub mailbox's settings.
+        self.config_path = Path(self.cfg_path)
+        self.engine.cfg["config_path"] = str(self.config_path)
+        self.engine.cfg["db_path"] = str(self.db)
+
+    def posted(self, patch):
+        return self.client.post("/api/config", json=patch)
+
+    def test_a_saved_setting_is_the_setting_the_engine_uses(self):
+        got = self.posted({"top": "27", "search_mode": "lexical"})
+        self.assertEqual(got.status_code, 200)
+        self.assertEqual(self.engine.cfg["top"], 27)
+        self.assertEqual(self.engine.cfg["search_mode"], "lexical")
+        on_disk = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["top"], 27)
+        self.assertEqual(self.client.get("/api/status").json()["top"], 27)
+
+    def test_the_answer_after_saving_still_hides_the_password(self):
+        self.posted({"gmail_app_password": "brandnewsecret"})
+        again = self.client.get("/api/config").json()
+        self.assertNotIn("brandnewsecret", json.dumps(again))
+        self.assertTrue(self.client.get("/api/config").json()["exists"])
+        stored = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["gmail_app_password"], "brandnewsecret")
+
+    def test_saving_leaves_the_index_open_on_the_thread_that_owns_it(self):
+        """A save re-opens the store, and a sqlite connection belongs to the
+        thread that opened it. Re-opened from the request thread, the next search
+        would answer with a ProgrammingError instead of results."""
+        self.posted({"top": "31"})
+        deadline = time.time() + 10.0
+        while not self.engine.ready and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(self.engine.ready, "the save never re-opened the index")
+        got = self.client.post("/api/search", json={"q": "domein"})
+        self.assertEqual(got.status_code, 200, got.text)
+        self.assertTrue(got.json()["results"])
+
+    def test_a_request_from_another_page_cannot_press_the_buttons(self):
+        """No login, no cookie, and it listens on localhost - so the only thing
+        between a stranger's page and "re-read my mailbox" / "rewrite my
+        settings file" is this check. Reads stay open; a picture on a page is not
+        worth breaking."""
+        evil = {"Origin": "http://evil.example"}
+        for path in ("/api/config", "/api/config/test", "/api/index/refresh"):
+            got = self.client.post(path, json={}, headers=evil)
+            self.assertEqual(got.status_code, 403, path)
+            self.assertIn("did not come from", got.json()["error"])
+        self.assertEqual(self.client.get("/api/status", headers=evil).status_code,
+                         200)
+        self.assertNotEqual(
+            self.client.post("/api/search", json={"q": "domein"},
+                             headers={"Origin": "http://testserver"}).status_code,
+            403)
+        # No Origin at all is curl and the CLI, which no browser can fake by
+        # accident: a page's fetch always says where it came from.
+        self.assertNotEqual(self.client.post("/api/search",
+                                            json={"q": "domein"}).status_code, 403)
+
+    def test_the_test_button_asks_and_saves_nothing(self):
+        """Test is the answer to "did I type it right" before anything is stored:
+        it must not write the file, and it must not need the password twice."""
+        seen = {}
+
+        def gmail(cfg):
+            seen["gmail_cfg"] = cfg
+            return {"ok": True, "detail": "logged in as me@example.com"}
+
+        with mock.patch.object(gui, "test_gmail", gmail), \
+                mock.patch.object(gui, "test_embedding",
+                                  lambda cfg: {"ok": True, "detail": "768"}):
+            got = self.client.post("/api/config/test",
+                                   json={"gmail_user": "other@example.com"})
+        self.assertEqual(got.status_code, 200, got.text)
+        body = got.json()
+        self.assertTrue(body["gmail"]["ok"] and body["embed"]["ok"])
+        # what the panel typed is what gets tried, over what is stored
+        self.assertEqual(seen["gmail_cfg"]["gmail_user"], "other@example.com")
+        self.assertEqual(self.engine.cfg["gmail_user"], "u@example.com")
+        stored = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(stored["gmail_user"], "u@example.com")
+
+    def test_the_test_button_reports_both_answers_even_when_one_is_no(self):
+        with mock.patch.object(gui, "test_gmail",
+                               lambda cfg: {"ok": False, "detail": "refused"}), \
+                mock.patch.object(gui, "test_embedding",
+                                  lambda cfg: {"ok": True, "detail": "fine"}):
+            body = self.client.post("/api/config/test", json={}).json()
+        self.assertFalse(body["gmail"]["ok"])
+        self.assertTrue(body["embed"]["ok"])
+        self.assertEqual(body["gmail"]["detail"], "refused")
+
+    def test_the_status_says_whether_there_is_anything_to_show_yet(self):
+        """An app that was just installed has no mailbox and no endpoint. Opening
+        on an empty list and "no results" is how a first run reads as broken."""
+        for key in gui.REQUIRED_FIELDS:
+            self.engine.cfg[key] = ""
+        status = self.client.get("/api/status").json()
+        self.assertTrue(status["needs_setup"])
+        self.assertEqual(status["missing"], list(gui.REQUIRED_FIELDS))
+        self.assertTrue(Path(status["config_path"]).is_absolute())
+        self.assertEqual(status["version"], gui.__version__)
+
+    def test_a_configured_run_does_not_hag_the_person_with_the_panel(self):
+        self.assertFalse(self.client.get("/api/status").json()["needs_setup"])
+
+
+class TestSettingsPage(unittest.TestCase):
+    """The card in the browser, read as source. There is no browser in this
+    suite, so the things only a browser would catch are pinned as contracts."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (gui.WEB_DIR / "app.js").read_text(encoding="utf-8")
+        cls.html = (gui.WEB_DIR / "index.html").read_text(encoding="utf-8")
+        cls.css = (gui.WEB_DIR / "app.css").read_text(encoding="utf-8")
+
+    def test_the_form_is_the_servers_form_not_a_second_copy_of_it(self):
+        """The page draws whatever `/api/config` lists. The alternative is a list
+        of field names in two files, and the failure mode of that is a setting
+        that looks like it saved and never reached the config."""
+        self.assertIn("for (const group of cfg.groups)", self.js)
+        self.assertIn("for (const f of g.fields)", self.js)
+        for secret in gui.SECRET_FIELDS:
+            self.assertNotIn(secret, self.js)
+
+    def test_a_password_box_is_never_filled_with_the_password(self):
+        """Two halves of one decision: the value is not put in the box, and the
+        box says what an empty one means. Without the second half an empty box
+        reads as "this password is gone"."""
+        self.assertIn("if (f.kind !== 'secret') input.value", self.js)
+        self.assertIn("kept as it is", self.js)
+        self.assertIn("'stored'", self.js)
+
+    def test_a_first_run_meets_you_with_the_card_not_an_empty_list(self):
+        self.assertIn("state.status.needs_setup && !state.setupSeen", self.js)
+        self.assertIn("openSetup(true)", self.js)
+        self.assertIn("not set up", self.js)      # the pill says it too
+
+    def test_the_card_says_which_file_it_is_writing(self):
+        """It stores an app password on disk. The card names the file it is
+        writing, in the words the app used to choose it, rather than leaving that
+        to a README read after the fact."""
+        self.assertIn("$('setup-file')", self.js)
+        self.assertIn("${cfg.path}", self.js)
+        self.assertIn("not written yet", self.js)
+
+    def test_the_card_is_a_dialog_that_lets_you_leave(self):
+        self.assertIn('role="dialog"', self.html)
+        self.assertIn('aria-modal="true"', self.html)
+        self.assertIn('aria-labelledby="setup-title"', self.html)
+        self.assertIn('id="setup-title"', self.html)
+        self.assertIn("if (ev.key === 'Escape')", self.js)
+        self.assertIn("state.setupOpen", self.js)      # Tab stays inside it
+
+    def test_it_borrows_the_rooms_tokens_rather_than_inventing_colours(self):
+        """No shadows, one accent: the card is the same desk as the rest, so the
+        settings block draws on the tokens and spends the lamp on one button."""
+        block = self.css.split("/* -- settings")[1].split("/* -- narrow")[0]
+        self.assertNotIn("box-shadow: 0 2px", block)
+        self.assertNotIn("rgba(0, 0, 0", block)
+        self.assertIn("var(--surface-1)", block)
+        self.assertIn("var(--lamp)", block)
+        self.assertIn("prefers-reduced-motion", self.css)
 
 
 class TestTailLog(unittest.TestCase):
