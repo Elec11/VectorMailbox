@@ -30,7 +30,7 @@ extra (query rewriting, reranking, answer generation).
 ## Install
 
 ```bash
-uv tool install --from git+https://github.com/Elec11/Gmail-RAG.git@v0.1.0 vectormailbox
+uv tool install --from git+https://github.com/Elec11/VectorMailbox.git@v0.1.0 vectormailbox
 vectormailbox gui
 ```
 
@@ -40,13 +40,13 @@ first. The second command starts one local process and opens
 Gmail address, the app password and the embedding endpoint. Saving it writes the
 config and starts the first read of the mailbox.
 
-`--from` is there because the repository is called `Gmail-RAG` and the command is
+`--from` is there because the repository is called `VectorMailbox` and the command is
 called `vectormailbox`, and `uv` needs to be told which name is which. Two
 variants worth knowing:
 
 ```bash
-pipx install git+https://github.com/Elec11/Gmail-RAG.git@v0.1.0       # if you use pipx
-uvx --from git+https://github.com/Elec11/Gmail-RAG.git@v0.1.0 vectormailbox gui
+pipx install git+https://github.com/Elec11/VectorMailbox.git@v0.1.0       # if you use pipx
+uvx --from git+https://github.com/Elec11/VectorMailbox.git@v0.1.0 vectormailbox gui
 ```
 
 The second runs it without installing anything — the quickest way to look at the
