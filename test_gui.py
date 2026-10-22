@@ -1912,6 +1912,87 @@ class TestRefresh(Fixture):
         self.assertIn("could not start", r.json()["error"])
         self.assertFalse(self.client.get("/api/index/refresh").json()["running"])
 
+    def test_the_child_is_told_which_index_to_build(self):
+        """Refresh has to re-index *this* mailbox. A child left to resolve its
+        own paths is the failure mode an installed app has: the window shows one
+        index and the button quietly builds another one somewhere else."""
+        seen = {}
+
+        def fake_popen(cmd, **kwargs):
+            seen["cmd"] = cmd
+            seen["cwd"] = kwargs.get("cwd")
+            return FakeProc(code=0)
+
+        with mock.patch.object(gui.subprocess, "Popen", fake_popen):
+            self.client.post("/api/index/refresh")
+            self.wait_until_stopped()
+        self.assertIn("--db", seen["cmd"])
+        db = seen["cmd"][seen["cmd"].index("--db") + 1]
+        self.assertEqual(db, str(self.engine.db_path))
+        self.assertEqual(Path(db).parent, Path(seen["cwd"]))
+
+
+class TestIndexCommand(unittest.TestCase):
+    """Refresh runs a command, and an installed app has to build that command
+    differently from a checkout. This is the only place that difference is
+    allowed to live."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.data = Path(self.tmp.name)
+
+    def test_it_names_the_package_not_a_script_file(self):
+        """Once the app is installed there is no `mailbox.py` beside the GUI, and
+        pointing a child at one is how Refresh breaks for the only people who
+        followed the install instructions."""
+        cmd = gui.index_command({"config_path": str(self.data / "config.json"),
+                                 "db_path": str(self.data / "mailbox.db")})
+        self.assertEqual(cmd[:3], [sys.executable, "-m", "vectormailbox"])
+        self.assertEqual(cmd[-1], "index")
+        self.assertFalse([a for a in cmd if str(a).endswith(".py")],
+                         "the child has to be started through the package")
+
+    def test_it_uses_the_interpreter_that_imported_the_gui(self):
+        """`python` off the PATH is a different program, and on a machine that
+        installed with pipx it is a python with no numpy in it."""
+        self.assertEqual(gui.index_command({})[0], sys.executable)
+        self.assertEqual(gui.index_command({}, python="/somewhere/other")[0],
+                         "/somewhere/other")
+
+    def test_it_names_the_files_the_engine_is_reading(self):
+        cfg = {"config_path": str(self.data / "config.json"),
+               "db_path": str(self.data / "baseline.db")}
+        cmd = gui.index_command(cfg)
+        self.assertEqual(cmd[cmd.index("--config") + 1], cfg["config_path"])
+        self.assertEqual(cmd[cmd.index("--db") + 1], cfg["db_path"])
+
+    def test_the_global_flags_come_before_the_subcommand(self):
+        """`--config` and `--db` are global options: the root parser reads them
+        before the subcommand, and `index` refuses them after it. Asserted
+        against the real parser rather than against this function's own string,
+        because the order that *fails* reads as the natural one to whoever tidies
+        the line up next - and it fails only once the app is installed.
+
+        `--help` stands in for the work: it is reached only after the flags
+        parsed, and it costs no mailbox.
+        """
+        cfg = {"config_path": str(self.data / "c.json"),
+               "db_path": str(self.data / "m.db")}
+        good = gui.index_command(cfg) + ["--help"]
+        human = [sys.executable, "-m", "vectormailbox", "index",
+                 "--config", cfg["config_path"], "--db", cfg["db_path"]]
+        quiet = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+        self.assertEqual(subprocess.run(good, **quiet).returncode, 0)
+        self.assertEqual(subprocess.run(human, **quiet).returncode, 2)
+
+    def test_an_unnamed_database_is_omitted_rather_than_passed_empty(self):
+        """`--db ""` is not "use whatever the config says": it is a database
+        called the empty string, and the child would try to open a file nobody
+        can point at."""
+        cmd = gui.index_command({"config_path": "", "db_path": None})
+        self.assertEqual(cmd, [sys.executable, "-m", "vectormailbox", "index"])
+
 
 class TestTailLog(unittest.TestCase):
     def test_carriage_returns_become_rows_and_only_the_tail_survives(self):

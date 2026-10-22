@@ -85,8 +85,7 @@ log = logging.getLogger("gui")
 # Where the *shipped* files are: web/ is package data, so it sits beside this
 # module in a checkout and inside site-packages after `uv tool install`. The
 # user's own files are a different question entirely - see vectormailbox/paths.py.
-ROOT = paths.resource_root()
-WEB_DIR = ROOT / "web"
+WEB_DIR = paths.resource_root() / "web"
 
 #: Re-probe a downed endpoint at most this often, so a dead llama.cpp is one
 #: slow request per minute instead of one per query.
@@ -960,7 +959,7 @@ class Engine:
 
     # -- index refresh ------------------------------------------------------
     def start_refresh(self) -> dict:
-        """Run `mailbox.py index` as a child process and tail its log.
+        """Re-run the index as a child process and tail its log.
 
         A subprocess, not a thread: indexing wants to write the database this
         process has open, and `index` owns its own progress bar, watermark and
@@ -970,11 +969,16 @@ class Engine:
         with self._refresh_lock:
             if self.refresh["running"]:
                 raise EngineError("an index run is already going")
-            cmd = [sys.executable, str(ROOT / "mailbox.py"), "index"]
+            cmd = index_command(self.cfg)
+            # Beside the index being written, so the log, the preview sidecar and
+            # anything else the run leaves behind land in that folder rather than
+            # wherever the GUI happened to be launched from.
+            run_in = Path(self.db_path).expanduser().parent or paths.data_dir()
             self.refresh.update({"running": True, "started_at": time.time(),
                                  "finished_at": None, "exit_code": None,
                                  "log": "", "cmd": " ".join(cmd)})
             try:
+                run_in.mkdir(parents=True, exist_ok=True)
                 with open(self.refresh_log, "a", encoding="utf-8",
                           errors="replace") as fh:
                     fh.write(f"\n===== refresh start "
@@ -984,7 +988,7 @@ class Engine:
                     # opening a second one per run would leak a file handle each
                     # time, and the child does not need ours once it starts.
                     proc = subprocess.Popen(
-                        cmd, cwd=str(ROOT), stdin=subprocess.DEVNULL,
+                        cmd, cwd=str(run_in), stdin=subprocess.DEVNULL,
                         stdout=fh, stderr=subprocess.STDOUT)
             except Exception as e:
                 self.refresh.update({"running": False, "exit_code": -1})
@@ -1008,6 +1012,36 @@ class Engine:
         out = dict(self.refresh)
         out["log"] = tail_log(self.refresh_log)
         return out
+
+
+def index_command(cfg: dict, python: Optional[str] = None) -> list:
+    """The command that re-runs the index: this interpreter, the package, and the
+    files this engine is actually reading.
+
+    `-m vectormailbox` and not `mailbox.py`: an installed app has no script file
+    to point a child process at. There is the package, and there is the
+    interpreter that imported it - which, unlike one found on `PATH`, is
+    guaranteed to have numpy and requests in it.
+
+    Both the config and the database are passed on purpose. They are absolute by
+    the time they reach here (`load_config` anchors them), so the child indexes
+    the mailbox the GUI is showing instead of whatever a search from its own
+    working directory turns up - the difference between "Refresh" and "silently
+    build a second, empty index somewhere else".
+
+    `--config` and `--db` go *before* `index`, where the parser reads them: they
+    are global options, and after the subcommand argparse answers with a usage
+    error. Rearranging this line into the order a human would type it breaks the
+    button for everyone who installed the app, and only for them.
+    """
+    cmd = [python or sys.executable, "-m", "vectormailbox"]
+    cfg_path = str(cfg.get("config_path") or "").strip()
+    if cfg_path:
+        cmd += ["--config", cfg_path]
+    db = str(cfg.get("db_path") or "").strip()
+    if db:
+        cmd += ["--db", db]
+    return cmd + ["index"]
 
 
 def tail_log(path: Path, lines: int = 40) -> str:
