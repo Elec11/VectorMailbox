@@ -1138,7 +1138,7 @@ def cmd_bench(args) -> None:
         print(f"offline: scoring saved runs only ({names})")
     else:
         from . import mailbox as mb           # inside: only when we must touch the index
-        # The harness inherits the CLI's --profile, so `mailbox.py --profile
+        # The harness inherits the CLI's --profile, so `vectormailbox --profile
         # legacy bench` measures the old pipeline as it was configured - store
         # included, which is what decides the BM25 tokenizer on an old index.
         cfg = mb.load_config(str(_arg(args, "config", "config.json")),
@@ -1440,7 +1440,7 @@ how to edit {path}:
   `relevant` is a RULE-DERIVED weak label (see `note` on each row):
     - drop ids that are not really an answer: same subject, same sender or
       same day is not the same as "this is what I wanted"
-    - add the ones the rule missed: `python mailbox.py search "<query>"
+    - add the ones the rule missed: `vectormailbox search "<query>"
       --json` prints message_id and gmail_url per hit, paste those ids in
     - a list capped by the rule says so in `note`; uncap it if you know better
   `forbidden` = ids that must never rank for that query (the 40th newsletter
@@ -1697,7 +1697,7 @@ def cmd_audit(args) -> None:
           f"fts docs {fts}")
     if fts != chunks:
         print(f"  WARNING: {abs(chunks - fts)} chunks have no FTS row, so the "
-              f"lexical leg cannot see them: python mailbox.py reindex "
+              f"lexical leg cannot see them: vectormailbox reindex "
               f"--rebuild-fts")
     if vecs != chunks:
         # Two different problems hide behind one unequal pair: chunks the dense

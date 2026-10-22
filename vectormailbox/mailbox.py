@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mailbox.py - Hybrid-searchable Gmail inbox (dense + BM25, multi-resolution).
+vectormailbox - Hybrid-searchable Gmail inbox (dense + BM25, multi-resolution).
 
 Indexes Gmail (IMAP, app password) into a local SQLite + numpy vector store
 using EmbeddingGemma 2 via a remote embedding endpoint. Bodies, metadata
@@ -28,14 +28,14 @@ Two things make retrieval strong, and both are index-side:
      the vectors.
 
 Commands:
-  python mailbox.py index [--full] [--folders INBOX,SENT] [--limit N]
-  python mailbox.py search "query" [--mode hybrid|semantic|lexical]
+  vectormailbox index [--full] [--folders INBOX,SENT] [--limit N]
+  vectormailbox search "query" [--mode hybrid|semantic|lexical]
       [--top 10] [--time-weight] [--alpha 0.3] [--tiers small,large]
       [--pool 200] [--w-dense 0.5] [--w-lex 0.5] [--rrf-k 60] [--agg-k 3]
       [--explain] [--json]
-  python mailbox.py reindex [--tiers small,large] [--rebuild-fts] [--re-embed]
+  vectormailbox reindex [--tiers small,large] [--rebuild-fts] [--re-embed]
       [--retier] [--dry-run] [--limit N]
-  python mailbox.py stats
+  vectormailbox stats
 
 `reindex` re-derives chunk tiers and/or the FTS index from the text already
 in the database - no IMAP round-trip. `--rebuild-fts` costs zero embeddings,
@@ -312,7 +312,7 @@ DEFAULTS = {
     "profile": "v2",                # 'legacy' restores the pre-tuning pipeline
 }
 
-# `profile: legacy` (or `mailbox.py search --profile legacy`) turns every tuning
+# `profile: legacy` (or `vectormailbox search --profile legacy`) turns every tuning
 # knob added after the first release back off, so today's ranking stays
 # reproducible on an existing index: it is the A/B baseline, and the rollback.
 LEGACY_PROFILE = {
@@ -4229,11 +4229,11 @@ class Store:
         want = json.dumps(self.sizes, sort_keys=True)
         if got and got != want:
             log.warning("index built with chunk_sizes %s, config says %s - "
-                        "run: python mailbox.py reindex", got, want)
+                        "run: vectormailbox reindex", got, want)
         got = self.get_state("fts_tokenizer")
         if got and got != self.tokenizer:
             log.warning("index built with fts_tokenizer %r, config says %r - "
-                        "run: python mailbox.py reindex --rebuild-fts",
+                        "run: vectormailbox reindex --rebuild-fts",
                         got, self.tokenizer)
         for key, label in (("embed_model", "embed_model"), ("dim", "dim")):
             want = str(self.cfg.get(key, DEFAULTS.get(key, "")) or "")
@@ -4243,7 +4243,7 @@ class Store:
             if got and want and got != want:
                 log.warning("vectors were embedded with %s=%r, config says %r - old "
                             "and new vectors are different spaces, so scores mix; "
-                            "run: python mailbox.py reindex --re-embed",
+                            "run: vectormailbox reindex --re-embed",
                             label, got, want)
         got, want = self.get_state("embed_host"), _host_of(
             str(self.cfg.get("embed_endpoint", "")))
@@ -4251,7 +4251,7 @@ class Store:
             log.warning("vectors were embedded by the server at %s, config now "
                         "points at %s - the same model name on another server is "
                         "not necessarily the same build or quantisation; if it "
-                        "differs, run: python mailbox.py reindex --re-embed",
+                        "differs, run: vectormailbox reindex --re-embed",
                         got, want)
 
     # -- writes -----------------------------------------------------------
@@ -5417,10 +5417,10 @@ class Searcher:
 
         idx = self.store.load_index(with_vectors=need_vecs)
         if len(idx) == 0:
-            raise SystemExit("index is empty - run 'python mailbox.py index' first")
+            raise SystemExit("index is empty - run 'vectormailbox index' first")
         if need_vecs and self.store.stats()["vectors"] == 0:
             raise SystemExit("no vectors in the index - run "
-                             "'python mailbox.py index --full' first")
+                             "'vectormailbox index --full' first")
 
         # Leg 1: dense.
         dense_rows: list[tuple[int, float]] = []
@@ -5453,7 +5453,7 @@ class Searcher:
         if w_l > 0:
             if fts_docs == 0:
                 log.warning("FTS index is empty - the lexical leg finds nothing; "
-                            "run: python mailbox.py reindex --rebuild-fts")
+                            "run: vectormailbox reindex --rebuild-fts")
             else:
                 row_of = {cid: i for i, cid in enumerate(idx.cids)}
                 for cid, s in self.store.lexical_search(
@@ -5975,7 +5975,7 @@ def reconcile_deletions(cfg: dict, store: "Store", folders: list, *,
     """Reflect the mailbox's deletions in the index. Read-only over IMAP.
 
     Called by `index` (so the GUI's refresh button does it too) and by
-    `mailbox.py prune`. Returns a summary, which is also stored in
+    `vectormailbox prune`. Returns a summary, which is also stored in
     `index_state` so the GUI can say what the last refresh did without keeping
     a log file of its own.
     """
@@ -6869,7 +6869,7 @@ def _media_stats(store, media) -> None:
             no_uid += 1
     print(f"messages with an image and no preview: {missing}")
     if missing:
-        print("  -> python mailbox.py media --backfill")
+        print("  -> vectormailbox media --backfill")
         if no_uid:
             print(f"  ({no_uid} of them carry no UID: their preview comes with "
                   "the next index run)")
@@ -6881,7 +6881,7 @@ def _media_stats(store, media) -> None:
     gone = [m for m in sorted(done) if m not in live]
     if gone:
         print(f"previews of messages no longer indexed: {len(gone)}"
-              "  -> python mailbox.py media --prune-orphans")
+              "  -> vectormailbox media --prune-orphans")
 
 
 def _media_orphans(store, media, dry_run: bool = False) -> None:

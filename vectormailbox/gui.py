@@ -1,8 +1,8 @@
 """Mailbox-style web UI over the hybrid index: search, read, browse.
 
-`python gui.py` (or `python mailbox.py gui`) starts a local server and opens your
-browser. Everything is read-only against `mailbox.db` except the Refresh button,
-which runs `mailbox.py index` as a *subprocess* — this process never writes the
+`vectormailbox gui` starts a local server and opens your browser. Everything is
+read-only against `mailbox.db` except the Refresh button, which runs
+`vectormailbox index` as a *subprocess* — this process never writes the
 index, so a UI bug cannot damage an index that took an afternoon to build.
 
 Three things shape the design, and all three come from the engine underneath:
@@ -10,7 +10,7 @@ Three things shape the design, and all three come from the engine underneath:
 **The index is loaded once, not per query.** One `Store(cache_index=True)` holds
 ~146 MB of vectors for a 47 720-chunk mailbox. Re-reading it per keystroke would
 be the whole latency budget, so the `Engine` owns one snapshot and answers query
-after query from it, exactly like `mailbox.py shell`.
+after query from it, exactly like `vectormailbox shell`.
 
 **One worker thread for the index, on purpose.** Every database and search call
 runs on a single executor thread. That keeps one SQLite connection on the thread
@@ -1747,7 +1747,7 @@ def create_app(engine: Engine) -> FastAPI:
         if not thumb:
             return JSONResponse(
                 {"error": "no preview of this file is stored here — "
-                          "python mailbox.py media --backfill keeps them"},
+                          "vectormailbox media --backfill keeps them"},
                 status_code=404)
         return _served(thumb["bytes"], thumb["mime"], filename, request,
                        inline=True, cache=THUMB_CACHE)
@@ -1805,7 +1805,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run(args, cfg: dict) -> None:
-    """Serve. `mailbox.py gui` calls this with its already-loaded config."""
+    """Serve. `vectormailbox gui` calls this with its already-loaded config."""
     import uvicorn
 
     engine = Engine(cfg, top=getattr(args, "top", None))
