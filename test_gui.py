@@ -474,7 +474,11 @@ class TestRemovedMail(Fixture):
         self.drop_one()
         r = self.client.get("/api/message/bob")
         self.assertEqual(r.status_code, 404)
-        self.assertIn("removed from the index on 2026-10-21", r.json()["error"])
+        # The date is read back off the tombstone the drop just wrote, so this
+        # asserts the contract — the answer quotes the day the index recorded —
+        # instead of a calendar day, which is a test that fails on the next one.
+        when = self.store.tombstone("bob")["removed_at"][:10]
+        self.assertIn(f"removed from the index on {when}", r.json()["error"])
         self.assertIn("no longer holds this message", r.json()["error"])
 
     def test_mail_that_was_never_indexed_still_says_so(self):
