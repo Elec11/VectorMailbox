@@ -7,7 +7,7 @@ index, fused with Reciprocal Rank Fusion. Bodies, metadata (sender / To / Cc /
 attachment extensions), attachments (images, PDFs, Office files, optionally
 audio) and thread context (prior mails) are all indexed and searchable.
 
-The same index also serves a **mailbox-shaped web UI** (`python mailbox.py gui`):
+The same index also serves a **mailbox-shaped web UI** (`vectormailbox gui`):
 search, reading pane and inbox browse in the browser — search *with* a picture,
 pasted or dropped into the search bar, included — and your own pictures shown from
 previews cut while indexing, so a thumbnail is read off disk and Gmail is not
@@ -27,14 +27,95 @@ not interchangeable and `--profile legacy` keeps the old `Document:` /
 from SQLite's own BM25, not from a model. An LLM would only be an optional
 extra (query rewriting, reranking, answer generation).
 
-## Setup
+## Install
 
 ```bash
-pip install -r requirements.txt
-copy config.example.json config.json   # then fill in your values
+uv tool install --from git+https://github.com/Elec11/Gmail-RAG.git@v0.1.0 vectormailbox
+vectormailbox gui
 ```
 
-Fill in `config.json`:
+That is the install: no clone, no virtualenv to make by hand, no file to create
+first. The second command starts one local process and opens
+`http://127.0.0.1:8765/` in your browser, where a settings card asks for the
+Gmail address, the app password and the embedding endpoint. Saving it writes the
+config and starts the first read of the mailbox.
+
+`--from` is there because the repository is called `Gmail-RAG` and the command is
+called `vectormailbox`, and `uv` needs to be told which name is which. Two
+variants worth knowing:
+
+```bash
+pipx install git+https://github.com/Elec11/Gmail-RAG.git@v0.1.0       # if you use pipx
+uvx --from git+https://github.com/Elec11/Gmail-RAG.git@v0.1.0 vectormailbox gui
+```
+
+The second runs it without installing anything — the quickest way to look at the
+page, and the slowest way to use it, since every start resolves the dependencies
+again.
+
+Needs Python 3.10 or newer. Nothing leaves the machine except to the two places
+you name: mail is read from Gmail over IMAP, and the text you search goes to
+your own embedding endpoint. No telemetry, no third-party service, and the
+listener stays on `127.0.0.1` unless you point it at your network yourself.
+
+## Where things live
+
+An installed command runs from whatever folder the shell happens to be standing
+in, so nothing it needs is looked up relative to that folder. Config, index,
+previews and logs go in your own data folder:
+
+| | |
+|---|---|
+| macOS | `~/Library/Application Support/vectormailbox/` |
+| Windows | `%APPDATA%\vectormailbox\` |
+| Linux | `$XDG_DATA_HOME/vectormailbox`, default `~/.local/share/vectormailbox/` |
+
+Per-user on purpose: this app serves a whole mailbox with no login, so it should
+not put that mailbox somewhere a second account on the same machine can read,
+and it should not need administrator rights just to start. Inside it:
+`config.json`, written `0600` because it holds an app password; `mailbox.db`, the
+index, with its `-wal`/`-shm` sidecars while it is open; the preview sidecar the
+GUI reads thumbnails from; and `<db>.index.log`, the output of the last Refresh.
+
+Which `config.json` a run reads, first hit winning:
+
+1. `--config path/to/config.json` — a name that is not the default is an instruction
+2. `$VECTORMAILBOX_CONFIG`
+3. `$VECTORMAILBOX_HOME/config.json`, when it exists — naming the folder is a
+   statement about where this mailbox lives
+4. `./config.json` — a checkout, which is what every measurement in this
+   repository was run against
+5. `<data dir>/config.json` — and where a *new* one is written, never the current
+   directory
+
+`$VECTORMAILBOX_HOME` therefore moves the whole data folder, which is what a
+second mailbox, a second account, or a CI job wants.
+
+## First run
+
+```bash
+vectormailbox doctor      # read-only: what it found, and what to fix
+```
+
+`doctor` checks the Python version, which copy of the package answered and
+whether it was installed or cloned, the dependencies that are load-bearing, the
+sanitiser that stands between a stranger's HTML and your screen, the config file
+and who can read it, whether the data folder is *really* writable (it writes a
+file there to find out), and the index — including whether the vectors in it were
+made at the dimension the config says, which is the one mismatch this app can
+survive silently and return confidently wrong results from. `--offline` leaves
+out the two checks that need a network. It writes nothing, and exits non-zero when
+something failed, so it is as usable from a script as from a terminal.
+
+The two network checks are the same probes the settings card's *test* button
+runs, so a green terminal and a red page about one server cannot happen.
+
+The card holds the keys that have to be filled in. Everything the config
+understands — the card shows 16 of them, and a hand-edited file is still read,
+including keys the card does not show — is below. `config.example.json` is the
+same shape with every key in it and the secrets left empty:
+
+### Everything the config understands
 
 | key | meaning |
 |---|---|
@@ -100,30 +181,30 @@ Values can also come from env vars: `GMAIL_USER`, `GMAIL_APP_PASSWORD`,
 
 ```bash
 # First run: index everything in the configured folders
-python mailbox.py index --full
+vectormailbox index --full
 
 # Or a small test run first (50 most recent messages)
-python mailbox.py index --limit 50
+vectormailbox index --limit 50
 
 # Later runs are incremental (only mail newer than the last indexed date)
-python mailbox.py index
+vectormailbox index
 
 # Indexing is newest-first and resumable: if you Ctrl-C a --full run mid-way,
 # just re-run it - it picks up from where it left off (a watermark) and skips
 # what's already indexed. Recent mail is searchable as soon as its batch is done.
-python mailbox.py index --full   # (re-run after an interruption)
+vectormailbox index --full   # (re-run after an interruption)
 
 # If a run fails with an IMAP error, re-run with --debug to see every byte
-python mailbox.py index --limit 50 --debug
+vectormailbox index --limit 50 --debug
 
 # Search (hybrid by default: vectors + BM25, fused)
-python mailbox.py search "the invoice for the Flexa project"
-python mailbox.py search "8812-KX" --explain      # per-leg ranks + the RRF maths
-python mailbox.py search "factuur van flexa sinds maart"
-python mailbox.py search "factuur" --mode lexical  # BM25 only: needs no endpoint
-python mailbox.py search "dashboard" --tiers small,large
-python mailbox.py search "invoice" --json
-python mailbox.py search "transfer code" --log eval/queries.jsonl
+vectormailbox search "the invoice for the Flexa project"
+vectormailbox search "8812-KX" --explain      # per-leg ranks + the RRF maths
+vectormailbox search "factuur van flexa sinds maart"
+vectormailbox search "factuur" --mode lexical  # BM25 only: needs no endpoint
+vectormailbox search "dashboard" --tiers small,large
+vectormailbox search "invoice" --json
+vectormailbox search "transfer code" --log eval/queries.jsonl
 
 # Ranking knobs worth knowing (all of them live in config.json too):
 #   --min-relevance 0.30   say "nothing found" instead of showing junk
@@ -131,53 +212,53 @@ python mailbox.py search "transfer code" --log eval/queries.jsonl
 #   --demote-transactional 0.55              newsletters, not your mail
 #   --fusion-pool 200      how many messages each leg may hand to RRF
 #   --no-collapse / --no-filters / --no-tier-norm   turn a fix off to see it
-python mailbox.py search "newsletter" --demote-transactional 1 --no-collapse
+vectormailbox search "newsletter" --demote-transactional 1 --no-collapse
 
 # Interactive search: loads the index once, then answers from memory
-python mailbox.py shell
+vectormailbox shell
 #   mbox> factuur flexa            a query is typed plain
 #   mbox> :top 20  :min_relevance 0.4  :explain on  :json on  :mode lexical
 
 # The same search as a mailbox-style UI, in the browser on 127.0.0.1
-python mailbox.py gui                 # or: python gui.py --port 8765 --no-browser
+vectormailbox gui                 # or --port 8765 --no-browser, to choose the port
 
 # Compare two settings against the labelled eval set, with a paired bootstrap
-python mailbox.py bench --eval-file eval/eval.jsonl \
+vectormailbox bench --eval-file eval/eval.jsonl \
     --variant new= --variant old=profile=legacy
-python mailbox.py evalgen --n 60 --out eval/eval.proposed.jsonl
-python mailbox.py label "factuur flexa" 1        # mark result 1 relevant
-python mailbox.py audit                          # duplicates, quotes, FTS probes
+vectormailbox evalgen --n 60 --out eval/eval.proposed.jsonl
+vectormailbox label "factuur flexa" 1        # mark result 1 relevant
+vectormailbox audit                          # duplicates, quotes, FTS probes
 
 # Rebuild tiers / BM25 / text from what is already in the database (no IMAP)
-python mailbox.py reindex --dry-run         # prints what it costs, writes nothing
-python mailbox.py reindex --clean           # text hygiene: quoted replies,
+vectormailbox reindex --dry-run         # prints what it costs, writes nothing
+vectormailbox reindex --clean           # text hygiene: quoted replies,
                                             # footers, =?UTF-8?Q?= subjects
-python mailbox.py reindex --rebuild-fts     # BM25 only: costs zero embeddings
-python mailbox.py reindex --tiers small     # adds the small tier: costs embeddings
-python mailbox.py reindex --re-embed        # new prompt or model: re-embeds text
+vectormailbox reindex --rebuild-fts     # BM25 only: costs zero embeddings
+vectormailbox reindex --tiers small     # adds the small tier: costs embeddings
+vectormailbox reindex --re-embed        # new prompt or model: re-embeds text
 
 # Index statistics (per-tier counts, fts docs, vector bytes, and what Gmail
 # no longer has)
-python mailbox.py stats
+vectormailbox stats
 
 # Previews: the small pictures the GUI shows without asking Gmail (see
 # *The mailbox GUI*). Reads Gmail only for --backfill and --links, and only
 # with read verbs; every flag works with --dry-run first.
-python mailbox.py media                     # what is kept, and which mail has none yet
-python mailbox.py media --backfill          # cut the missing ones, newest mail first
-python mailbox.py media --backfill --limit 500
-python mailbox.py media --links             # the Gmail link for mail indexed before it was stored
-python mailbox.py media --prune-orphans     # previews of mail that is no longer indexed
-python mailbox.py media --clear             # delete every preview, keep the index
+vectormailbox media                     # what is kept, and which mail has none yet
+vectormailbox media --backfill          # cut the missing ones, newest mail first
+vectormailbox media --backfill --limit 500
+vectormailbox media --links             # the Gmail link for mail indexed before it was stored
+vectormailbox media --prune-orphans     # previews of mail that is no longer indexed
+vectormailbox media --clear             # delete every preview, keep the index
 
 # Drop what the configured folders no longer list (mail you deleted or archived
 # in Gmail). Read-only against Gmail; --dry-run writes nothing at all.
-python mailbox.py prune --dry-run
-python mailbox.py prune
-python mailbox.py index --no-prune    # a run without the reconcile
+vectormailbox prune --dry-run
+vectormailbox prune
+vectormailbox index --no-prune    # a run without the reconcile
 
 # Any command can point at another database - e.g. a frozen copy to measure
-python mailbox.py --db baseline-legacy.db --profile legacy stats
+vectormailbox --db baseline-legacy.db --profile legacy stats
 ```
 
 A `reindex` run leaves behind nothing that it created: it replaces the windows of
@@ -212,8 +293,8 @@ works immediately — over the coarse chunks the old index had, which still
 misses short quotes buried in long bodies. For the finer tiers:
 
 ```bash
-python mailbox.py reindex --dry-run    # prints exactly how many embeddings it costs
-python mailbox.py reindex              # backfills the missing tiers
+vectormailbox reindex --dry-run    # prints exactly how many embeddings it costs
+vectormailbox reindex              # backfills the missing tiers
 ```
 
 Only the *derived* windows get embedded: the canonical chunk of every source
@@ -241,8 +322,8 @@ stored** — `index` skips message-ids it already has. Re-derive offline instead
 ```bash
 python cap_audit.py                 # read-only: worst case per tier, what is
                                     # missing, and what each reindex costs
-python mailbox.py reindex --dry-run
-python mailbox.py reindex --tiers small
+vectormailbox reindex --dry-run
+vectormailbox reindex --tiers small
 ```
 
 `reindex` rebuilds *every* derived window of the tiers it builds, so a few
@@ -268,7 +349,7 @@ next run says so:
 ```
 WARNING vectors were embedded with embed_model='embeddinggemma-2:latest',
 config says 'embeddinggemma-2-Q8_0' - old and new vectors are different spaces,
-so scores mix; run: python mailbox.py reindex --re-embed
+so scores mix; run: vectormailbox reindex --re-embed
 ```
 
 (A changed server name warns too: the same model name on another host is not
@@ -414,11 +495,11 @@ Every check refuses rather than half-does the job:
 | login or connection error | nothing is removed; the run says the check did not happen |
 
 ```bash
-python mailbox.py prune --dry-run   # what would go, listed, and nothing written
-python mailbox.py prune             # the same, applied
-python mailbox.py prune --verbose   # also list them after a real run
-python mailbox.py index --no-prune  # index without reconciling
-python mailbox.py stats             # removed total, last reconcile, newest 10
+vectormailbox prune --dry-run   # what would go, listed, and nothing written
+vectormailbox prune             # the same, applied
+vectormailbox prune --verbose   # also list them after a real run
+vectormailbox index --no-prune  # index without reconciling
+vectormailbox stats             # removed total, last reconcile, newest 10
 ```
 
 The cost is one `UID SEARCH ALL` per folder once UIDs are recorded — about a
@@ -472,19 +553,21 @@ than a regression.
 ## The mailbox GUI
 
 ```bash
-python mailbox.py gui              # opens http://127.0.0.1:8765/ in your browser
-python gui.py --port 9000 --no-browser --db other.db
+vectormailbox gui                              # opens http://127.0.0.1:8765/ in your browser
+vectormailbox gui --port 9000 --no-browser --db other.db
 ```
 
-It needs `fastapi` and `uvicorn` (both in `requirements.txt`) and nothing else:
-the front end is three files in `web/`, served as static files, with no build
-step, no bundler and no CDN.
+It needs `fastapi` and `uvicorn` (both declared in `pyproject.toml`) and nothing
+else: the front end is four files in `vectormailbox/web/`, served as static
+files, with no build step, no bundler and no CDN. They ship inside the package,
+so the page is found whatever folder you started the command from — an installed
+command has no repository to look things up in.
 
 Three panes, in the shape your mail already has: a rail (view, totals, senders
 by volume), a result list, and a reading pane. It is the CLI's search, not a
 simplified one: `hybrid` / `semantic` / `lexical`, and every ranking knob in
 `config.json` in the tuning panel, so a result here and a result from
-`mailbox.py search` are the same arithmetic.
+`vectormailbox search` are the same arithmetic.
 
 What it shows that a terminal cannot:
 
@@ -540,12 +623,14 @@ Browsing is separate from searching on purpose: the inbox view pages by keyset
 message) and its text box is a `LIKE` over subject, sender and preview — not
 BM25. Typing a sender's name in a list must not start surfacing 2019.
 
-**Refresh** runs `mailbox.py index` as a subprocess and tails its progress in a
-panel; the index is re-opened when it finishes, so the warm snapshot never
-outlives the data. That run also reconciles the folders, which is what makes a
-Refresh in Gmail show up here (see *When you delete mail*) — so a refresh can
-take messages *out*, and the toast that finishes says how many. Output goes to
-`gui-index.log`.
+**Refresh** runs `vectormailbox index` as a subprocess — through the installed
+package, not a script file, because an installed app has no file beside it to
+exec — and tails its progress in a panel; the index is re-opened when it
+finishes, so the warm snapshot never outlives the data. That run also reconciles
+the folders, which is what makes a Refresh in Gmail show up here (see *When you
+delete mail*) — so a refresh can take messages *out*, and the toast that finishes
+says how many. The output of the run goes beside the index, in
+`<db>.index.log`.
 
 Three things the GUI cannot do, and one it can. It cannot mark mail read (the
 `\Seen` flag is not in this schema). It cannot delete, archive or otherwise
@@ -565,7 +650,7 @@ channel that is opaque everywhere is not that case, and asking the pixels rather
 than the colour mode is what kept a mailbox's largest previews from being 190 KB
 copies of a 320 px picture. The file itself stays one click away in that same box,
 and a file with no preview answers with the command that cuts one
-(`python mailbox.py media --backfill`).
+(`vectormailbox media --backfill`).
 
 Everything that is not a preview comes from the account when it is opened: the
 click re-reads that message from the folder and UID its row recorded, and it reads
@@ -696,7 +781,7 @@ searches text, and the strip under the frame says so on every mail it renders.
 
 **Bind to `127.0.0.1` and leave it there.** There is no authentication, and your
 whole mailbox is behind it. `--host 0.0.0.0` puts an unauthenticated mailbox on
-your network; `--host 127.0.0.1` is also the default of the raw `gui.py`. The
+your network; `127.0.0.1` is also the built-in default of `vectormailbox gui`. The
 previews are part of that same boundary: `mailbox.media.db` holds pictures of your
 mail — and, since the mail view, the HTML body of every mail you opened — in plain
 view of anything that can read the file, which on your own machine is
@@ -751,7 +836,7 @@ two workers and never touch the search queue at all.
 
 ## Embedding endpoint contract
 
-The default adapter in `mailbox.py` (`EmbeddingClient`) speaks an
+The default adapter in `vectormailbox/mailbox.py` (`EmbeddingClient`) speaks an
 OpenAI-compatible shape, and also reads Ollama's native reply so either URL
 works:
 
@@ -813,12 +898,12 @@ One known case: **Ollama cannot embed images for embedding models.** Its
 a string`), and although native `/api/embed` accepts an `images` array, the
 reply is byte-identical with, without and with a different image (verified on
 Ollama 0.40.6 with `embeddinggemma-2`, whose `/api/show` even advertises a
-`vision` capability). `mailbox.py` detects a native endpoint and indexes
+`vision` capability). `vectormailbox` detects a native endpoint and indexes
 attachments as text with one clear warning, instead of storing filename
 vectors under a tier that implies otherwise. For real attachment-content
 search, run `embed_server.py` and point `embed_endpoint` at it.
 
-Two endpoints are verified to really embed pixels, and `mailbox.py` negotiates
+Two endpoints are verified to really embed pixels, and `vectormailbox` negotiates
 between their envelopes automatically (the first media chunk tries the
 configured shape, then the other, and logs what it settled on):
 
@@ -854,13 +939,13 @@ instead, and the status dot then knows this endpoint cannot do it.
 ## Measuring a change
 
 Search quality is not a feeling. `eval.py` (registered as `bench`, `evalgen`,
-`label` and `audit` under `mailbox.py`) scores ranked lists against a labelled
+`label` and `audit`) scores ranked lists against a labelled
 set and, when two settings are compared, resamples the *same* queries so the
 question is answered with a confidence interval instead of a decimal:
 
 ```bash
-python mailbox.py bench --eval-file eval/eval.jsonl --variant new= --variant old=profile=legacy
-python mailbox.py bench --eval-file eval/eval.jsonl --baseline baseline.json --offline
+vectormailbox bench --eval-file eval/eval.jsonl --variant new= --variant old=profile=legacy
+vectormailbox bench --eval-file eval/eval.jsonl --baseline baseline.json --offline
 ```
 
 Every change in this pipeline is justified by a delta whose interval excludes
@@ -893,7 +978,7 @@ label lists that are longer than the list a user can see — a rule that matched
 38 mails makes recall@10 ≤ 0.26 no matter how good the ranking is, which is a
 property of the label, not of the search. **The labels are weak until you look
 at them**: delete rows you would never ask, add the answers a rule missed with
-`python mailbox.py label "<query>" <rank>`.
+`vectormailbox label "<query>" <rank>`.
 
 The honest source of new queries is real use: `search "…" --log eval/queries.jsonl`
 appends every query someone actually typed, with what each leg ranked. Those are
@@ -906,7 +991,7 @@ row is this database with one setting changed; the baseline row is the frozen
 copy of the mailbox from before this work, so it differs in corpus *and* ranking.
 
 ```bash
-python mailbox.py bench --eval-file eval/eval.jsonl --variant new= \
+vectormailbox bench --eval-file eval/eval.jsonl --variant new= \
     --variant demote=demote_transactional=0.55 --variant nocollapse=collapse=false \
     --variant oldranking=profile=legacy --variant lexical=mode=lexical \
     --variant oldprompts=cfg.prompt_scheme=legacy \
@@ -980,7 +1065,7 @@ pretending otherwise would cost real answers.
 ```bash
 python test_mailbox.py        # 216 tests, no endpoint and no network needed
 python test_eval.py           # 88 tests for the evaluation tools
-python test_gui.py            # 123 tests for the web layer, same stub endpoint
+python test_gui.py            # 159 tests for the web layer, same stub endpoint
 python test_mailhtml.py       # 36 tests for the mail view, no IMAP at all
 ```
 
@@ -1084,7 +1169,7 @@ and that **mail text never becomes markup** — a message whose
 subject is `<img src=x onerror=alert(1)>` is served as JSON data and both front-end
 scripts are asserted to contain none of the four words that would parse markup into
 the page (`innerHTML` and its three relatives), in code or in prose, so that a grep
-across `web/` is a complete answer. Both files are also run
+across `vectormailbox/web/` is a complete answer. Both files are also run
 through `node --check` when Node is installed (skipped when it is not), because
 a stray parenthesis once left the page a silent static shell while every
 Python-side assertion still passed. One more runs the front end's *arithmetic*

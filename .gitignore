@@ -24,7 +24,7 @@ config.json
 *.old
 
 # ---------------------------------------------------------------------------
-# Run output. gui.py tails a Refresh into gui-index.log; `bench`, `reindex`
+# Run output. the GUI tails a Refresh into <db>.index.log; `bench`, `reindex`
 # and `audit` are otherwise redirected with `>` into a file, and those files
 # (final-*.json, demote-*.json, baseline-*-*.json) are the scratch the README's
 # numbers were read off — the numbers are in the README, the dumps are not.
@@ -49,7 +49,8 @@ eval/eval.proposed.jsonl
 
 # ---------------------------------------------------------------------------
 # Python. Byte-code beside the sources, the usual caches, and any venv — the
-# real install path is requirements.txt into whatever environment you use.
+# real install path is `uv tool install` from the git URL in the README;
+# requirements.txt stays the checkout’s editable install.
 # ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
@@ -73,7 +74,7 @@ pip-log.txt
 .ipynb_checkpoints/
 
 # A wheel unpacked beside the code so the mail view can run without touching
-# site-packages (`PYTHONPATH=.deps`). requirements.txt is the real install path.
+# site-packages (`PYTHONPATH=.deps`). `uv tool install` is the real path.
 .deps/
 
 # ---------------------------------------------------------------------------
