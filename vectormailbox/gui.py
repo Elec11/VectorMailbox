@@ -60,7 +60,7 @@ from fastapi import Body, FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import mailbox
+from . import mailbox, paths
 from .mailbox import (DEFAULTS, EmbeddingClient, GmailFetcher, GmailSession,
                      HTML_CIDS, HTML_PART, MediaCache, QUERY_IMAGE_TYPES,
                      Searcher, Store, gmail_index, load_config,
@@ -82,9 +82,11 @@ except ImportError as e:
 
 log = logging.getLogger("gui")
 
-ROOT = Path(__file__).resolve().parent
+# Where the *shipped* files are: web/ is package data, so it sits beside this
+# module in a checkout and inside site-packages after `uv tool install`. The
+# user's own files are a different question entirely - see vectormailbox/paths.py.
+ROOT = paths.resource_root()
 WEB_DIR = ROOT / "web"
-REFRESH_LOG = ROOT / "gui-index.log"
 
 #: Re-probe a downed endpoint at most this often, so a dead llama.cpp is one
 #: slow request per minute instead of one per query.
@@ -208,6 +210,9 @@ class Engine:
         self.cfg = dict(cfg)
         self.top = int(top) if top else int(cfg.get("top", 10) or 10)
         self.db_path = str(cfg.get("db_path", "mailbox.db"))
+        #: where the last index run wrote its progress: beside the index it
+        #: describes, so `--db baseline.db` does not append to the live mailbox
+        self.refresh_log = paths.index_log(self.db_path)
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="mbox")
         #: previews and file bytes, away from the thread that owns the index
         self._media_pool = ThreadPoolExecutor(max_workers=MEDIA_WORKERS,
@@ -970,7 +975,7 @@ class Engine:
                                  "finished_at": None, "exit_code": None,
                                  "log": "", "cmd": " ".join(cmd)})
             try:
-                with open(REFRESH_LOG, "a", encoding="utf-8",
+                with open(self.refresh_log, "a", encoding="utf-8",
                           errors="replace") as fh:
                     fh.write(f"\n===== refresh start "
                              f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -1001,7 +1006,7 @@ class Engine:
 
     def refresh_status(self) -> dict:
         out = dict(self.refresh)
-        out["log"] = tail_log(REFRESH_LOG)
+        out["log"] = tail_log(self.refresh_log)
         return out
 
 
@@ -1266,7 +1271,7 @@ def create_app(engine: Engine) -> FastAPI:
     async def refresh_status():
         eng: Engine = app.state.engine
         out = dict(eng.refresh)
-        out["log"] = tail_log(REFRESH_LOG)
+        out["log"] = tail_log(eng.refresh_log)
         return out
 
     if WEB_DIR.is_dir():

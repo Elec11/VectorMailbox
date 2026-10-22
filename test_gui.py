@@ -1851,8 +1851,8 @@ class FakeProc:
 class TestRefresh(Fixture):
     def setUp(self):
         super().setUp()
-        self.log = Path(self.tmp.name) / "gui-index.log"
-        patcher = mock.patch.object(gui, "REFRESH_LOG", self.log)
+        self.log = Path(self.tmp.name) / "mailbox.index.log"
+        patcher = mock.patch.object(self.engine, "refresh_log", self.log)
         patcher.start()
         self.addCleanup(patcher.stop)
 

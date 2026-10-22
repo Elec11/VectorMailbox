@@ -80,6 +80,8 @@ try:
 except ImportError:  # pragma: no cover
     BeautifulSoup = None
 
+from . import paths
+
 try:
     # Optional by design: 'from:flexa factuur van vorige week' is better with
     # its filters parsed out, but search must work if the module is missing.
@@ -334,8 +336,12 @@ GEMMA_QUERY = "task: {task} | query: {query}"
 _NO_TITLE = "none"
 
 
-def load_config(path: str = "config.json", profile: str = "") -> dict:
+def load_config(path: str = "", profile: str = "") -> dict:
     """Config = DEFAULTS, then config.json, then environment, then profile.
+
+    `path` empty - or the `config.json` the CLI passes when nobody said
+    otherwise - is resolved by `paths.config_path`: the file is looked for where
+    it belongs, not in whichever folder the command happened to run from.
 
     `profile` (also settable as the `profile` key) selects a set of ranking
     knobs: 'v2' (the default) and 'legacy', the pre-tuning pipeline, used as the
@@ -354,7 +360,7 @@ def load_config(path: str = "config.json", profile: str = "") -> dict:
     from_file: set[str] = set()
     from_env: set[str] = set()
     file_profile = ""
-    p = Path(path)
+    p = paths.config_path(path)
     if p.exists():
         user = json.loads(p.read_text(encoding="utf-8"))
         from_file |= set(user)
@@ -400,7 +406,13 @@ def load_config(path: str = "config.json", profile: str = "") -> dict:
                     ", ".join(sorted(overridden)[:8]))
     # Where this config came from, so a later re-load (bench --variant
     # profile=legacy) reads the same file instead of a default path.
-    cfg["config_path"] = str(path)
+    cfg["config_path"] = str(p)
+    # A relative db_path is anchored once, here, beside the config that names it
+    # - not against the current directory, which under `uvx` is wherever the
+    # shell happened to be standing. Store, the preview sidecar and the index
+    # run's log all derive from this value, so anchoring it anchors all three.
+    if cfg.get("db_path"):
+        cfg["db_path"] = str(paths.beside(p.parent, cfg["db_path"]))
     return cfg
 
 
@@ -6292,7 +6304,11 @@ def _apply_db(args, cfg: dict) -> dict:
     frozen copy of an index must not need a second config file."""
     db = getattr(args, "db", None)
     if db:
-        cfg["db_path"] = str(db)
+        # Typed by someone standing next to the file, so relative to the current
+        # directory - unlike a db_path read out of a config file, which is
+        # resolved beside that file. Two rules, each the obvious one where it
+        # applies.
+        cfg["db_path"] = str(paths.from_cwd(db))
     return cfg
 
 
